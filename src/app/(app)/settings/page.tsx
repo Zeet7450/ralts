@@ -2,7 +2,7 @@
 
 import { useTranslations } from "next-intl";
 import Link from "next/link";
-import { Moon, Sun, Globe, Bell, LogOut, ChevronRight } from "lucide-react";
+import { Moon, Sun, Globe, Bell, LogOut, ChevronRight, ArrowLeft } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useThemeStore } from "@/stores/theme-store";
 import { useLocaleStore } from "@/stores/locale-store";
@@ -30,9 +30,18 @@ export default function SettingsPage() {
 
   return (
     <div className="min-h-screen pb-24">
-      {/* Header */}
+      {/* Header with back button */}
       <div className="px-4 pt-4 pb-2">
-        <h1 className="text-xl font-semibold">{t("settings.title")}</h1>
+        <div className="flex items-center gap-3">
+          <button
+            onClick={() => router.push("/dashboard")}
+            className="flex items-center justify-center h-10 w-10 rounded-md text-text-secondary hover:text-text-primary hover:bg-surface-elevated transition-colors active:scale-95 -ml-2"
+            aria-label="Go back"
+          >
+            <ArrowLeft className="h-5 w-5" strokeWidth={1.5} />
+          </button>
+          <h1 className="text-xl font-semibold">{t("settings.title")}</h1>
+        </div>
       </div>
 
       {/* Settings list */}
@@ -114,10 +123,13 @@ export default function SettingsPage() {
           </div>
         </Link>
 
-        {/* Sign Out */}
+        {/* Divider */}
+        <div className="h-4" />
+
+        {/* Sign Out — visually separated, intentional placement */}
         <button
           onClick={handleSignOut}
-          className="w-full bg-surface rounded-lg p-4 flex items-center gap-3 text-destructive hover:bg-surface-elevated transition-colors"
+          className="w-full bg-surface rounded-lg p-4 flex items-center gap-3 text-destructive hover:bg-destructive/10 transition-colors"
         >
           <LogOut className="h-5 w-5" strokeWidth={1.5} />
           <span className="text-sm font-medium">{t("settings.sign_out")}</span>

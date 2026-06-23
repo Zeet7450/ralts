@@ -9,7 +9,6 @@ import {
   Lightbulb,
   CheckSquare,
   BookHeart,
-  Settings,
 } from "lucide-react";
 import { useTranslations } from "next-intl";
 import { cn } from "@/lib/utils";
@@ -26,7 +25,6 @@ const tabs: TabItem[] = [
   { href: "/ideas", labelKey: "ideas", icon: Lightbulb },
   { href: "/tasks", labelKey: "tasks", icon: CheckSquare },
   { href: "/reflection", labelKey: "reflection", icon: BookHeart },
-  { href: "/settings", labelKey: "settings", icon: Settings },
 ];
 
 export function MobileNav() {
