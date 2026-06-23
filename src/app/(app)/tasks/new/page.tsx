@@ -7,6 +7,7 @@ import { ArrowLeft } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { DateTimePickerField } from "@/components/ui/date-time-picker";
 import { createClient } from "@/lib/supabase/client";
 import { useAuthStore } from "@/stores/auth-store";
 import { generateId } from "@/lib/utils";
@@ -76,13 +77,11 @@ export default function NewTaskPage() {
         </div>
 
         <div className="space-y-1.5">
-          <Label htmlFor="due_date" className="text-xs font-medium text-text-secondary">Due date</Label>
-          <Input
-            id="due_date"
-            type="datetime-local"
+          <DateTimePickerField
+            label="Due date"
             value={dueDate}
-            onChange={(e) => setDueDate(e.target.value)}
-            className="h-11 bg-surface border-border"
+            onChange={setDueDate}
+            placeholder="Select date and time"
           />
         </div>
 

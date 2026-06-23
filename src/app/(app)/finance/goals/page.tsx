@@ -8,6 +8,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
+import { DatePickerField } from "@/components/ui/date-picker";
 import { useFinanceStore } from "@/stores/finance-store";
 import { formatCurrency } from "@/lib/utils";
 
@@ -76,12 +77,11 @@ export default function GoalsPage() {
                 />
               </div>
               <div className="space-y-2">
-                <Label htmlFor="goal-deadline">{t("tasks.due_date")} ({t("common.optional")})</Label>
-                <Input
-                  id="goal-deadline"
-                  type="date"
+                <DatePickerField
+                  label={`${t("tasks.due_date")} (${t("common.optional")})`}
                   value={newGoal.deadline}
-                  onChange={(e) => setNewGoal({ ...newGoal, deadline: e.target.value })}
+                  onChange={(deadline) => setNewGoal({ ...newGoal, deadline })}
+                  placeholder="Select deadline"
                 />
               </div>
               <div className="flex gap-2">

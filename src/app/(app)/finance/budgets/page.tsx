@@ -8,6 +8,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Progress } from "@/components/ui/progress";
 import { Badge } from "@/components/ui/badge";
+import { MonthPicker } from "@/components/ui/month-picker";
 import { useFinanceStore } from "@/stores/finance-store";
 import { formatCurrency, getMonthString } from "@/lib/utils";
 
@@ -44,12 +45,9 @@ export default function BudgetsPage() {
 
       {/* Month selector */}
       <div className="flex items-center gap-4">
-        <input
-          type="month"
-          value={selectedMonth}
-          onChange={(e) => setSelectedMonth(e.target.value)}
-          className="px-3 py-2 rounded-md border border-border bg-surface text-sm"
-        />
+        <div className="w-48">
+          <MonthPicker value={selectedMonth} onChange={setSelectedMonth} />
+        </div>
         <div className="text-sm text-text-secondary">
           Total spent: <span className="font-medium text-text-primary">{formatCurrency(monthExpenses)}</span>
         </div>

@@ -5,6 +5,7 @@ import { useTranslations } from "next-intl";
 import Link from "next/link";
 import { Plus, TrendingUp, TrendingDown, PiggyBank, Target, BarChart3 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { MonthPicker } from "@/components/ui/month-picker";
 import { useFinanceStore } from "@/stores/finance-store";
 import { formatCurrency, formatDate, getMonthString } from "@/lib/utils";
 
@@ -43,12 +44,7 @@ export default function FinancePage() {
           </Link>
         </div>
         {/* Month picker — compact, full-width */}
-        <input
-          type="month"
-          value={selectedMonth}
-          onChange={(e) => setSelectedMonth(e.target.value)}
-          className="w-full h-9 rounded-lg border border-border bg-surface px-3 text-sm text-text-primary"
-        />
+        <MonthPicker value={selectedMonth} onChange={setSelectedMonth} />
       </div>
 
       <div className="px-4 space-y-3">

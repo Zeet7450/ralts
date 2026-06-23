@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
+import { DateTimePickerField } from "@/components/ui/date-time-picker";
 import { useTasksStore } from "@/stores/tasks-store";
 import type { Task } from "@/types";
 
@@ -118,13 +119,11 @@ export default function TaskDetailPage() {
         </div>
 
         <div className="space-y-1.5">
-          <Label htmlFor="due_date" className="text-xs font-medium text-text-secondary">Due date</Label>
-          <Input
-            id="due_date"
-            type="datetime-local"
+          <DateTimePickerField
+            label="Due date"
             value={dueDate}
-            onChange={(e) => setDueDate(e.target.value)}
-            className="h-11 bg-surface border-border"
+            onChange={setDueDate}
+            placeholder="Select date and time"
           />
         </div>
 

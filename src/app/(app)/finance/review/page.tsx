@@ -6,6 +6,7 @@ import { ArrowLeft } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
+import { MonthPicker } from "@/components/ui/month-picker";
 import { useFinanceStore } from "@/stores/finance-store";
 import { formatCurrency, getMonthString } from "@/lib/utils";
 
@@ -48,12 +49,7 @@ export default function ReviewPage() {
       </div>
 
       {/* Month selector */}
-      <input
-        type="month"
-        value={selectedMonth}
-        onChange={(e) => setSelectedMonth(e.target.value)}
-        className="px-3 py-2 rounded-md border border-border bg-surface text-sm"
-      />
+      <MonthPicker value={selectedMonth} onChange={setSelectedMonth} />
 
       {/* Summary cards */}
       <div className="grid gap-4 grid-cols-2 sm:grid-cols-3">

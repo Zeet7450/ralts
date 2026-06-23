@@ -7,6 +7,7 @@ import { ArrowLeft, Trash2, TrendingUp, TrendingDown } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { DatePickerField } from "@/components/ui/date-picker";
 import { useFinanceStore } from "@/stores/finance-store";
 import { formatCurrency } from "@/lib/utils";
 
@@ -267,14 +268,11 @@ export default function TransactionDetailPage() {
         </div>
 
         <div className="space-y-1.5">
-          <Label htmlFor="date" className="text-xs font-medium text-text-secondary">{t("finance.date")}</Label>
-          <Input
-            id="date"
-            type="date"
+          <DatePickerField
+            label={t("finance.date")}
             value={formData.date}
-            onChange={(e) => setFormData({ ...formData, date: e.target.value })}
-            required
-            className="h-11 bg-surface border-border"
+            onChange={(date) => setFormData({ ...formData, date: date })}
+            placeholder="Select date"
           />
         </div>
 
