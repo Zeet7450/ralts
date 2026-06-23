@@ -1,36 +1,9 @@
 import type { NextConfig } from "next";
 import createNextIntlPlugin from "next-intl/plugin";
-import withPWAInit from "@ducanh2912/next-pwa";
 
-const withPWA = withPWAInit({
-  dest: "public",
-  disable: process.env.NODE_ENV === "development",
-  register: true,
-  sw: "custom-sw.js", // Use our custom service worker
-  workboxOptions: {
-    disableDevLogs: true,
-    runtimeCaching: [
-      {
-        urlPattern: /^https:\/\/fonts\.(?:gstatic|googleapis)\.com\/.*/i,
-        handler: "CacheFirst",
-        options: {
-          cacheName: "google-fonts",
-          expiration: {
-            maxEntries: 10,
-            maxAgeSeconds: 365 * 24 * 60 * 60,
-          },
-        },
-      },
-      {
-        urlPattern: /\.(?:js|css|woff2?)$/i,
-        handler: "StaleWhileRevalidate",
-        options: {
-          cacheName: "static-resources",
-        },
-      },
-    ],
-  },
-});
+// Note: a service worker is served from /public/sw.js and registered by the
+// notifications settings page. We previously used @ducanh2912/next-pwa, but it
+// is not compatible with Next.js Turbopack and silently produced no output.
 
 const withNextIntl = createNextIntlPlugin("./src/i18n/request.ts");
 
@@ -41,4 +14,4 @@ const nextConfig: NextConfig = {
   },
 };
 
-export default withNextIntl(withPWA(nextConfig));
+export default withNextIntl(nextConfig);

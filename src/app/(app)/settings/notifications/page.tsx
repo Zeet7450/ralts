@@ -2,14 +2,13 @@
 
 import { useTranslations } from "next-intl";
 import { useRouter } from "next/navigation";
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import {
   ArrowLeft,
   Bell,
   BellOff,
   AlertCircle,
   CheckCircle2,
-  Wifi,
   WifiOff,
   RefreshCw,
   Smartphone,
@@ -22,19 +21,38 @@ type NotificationState = "unsupported" | "denied" | "granted" | "default" | "loa
 type SwState = "not-registered" | "registering" | "registered" | "error";
 type PushState = "no-subscription" | "subscribing" | "subscribed" | "error";
 
-// VAPID public key — same as VAPID_PUBLIC_KEY env var (safe to expose client-side)
+// VAPID public key — exposed client-side by NEXT_PUBLIC_ prefix
 const VAPID_PUBLIC_KEY = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY || "";
+const SW_URL = "/sw.js";
+const SW_SCOPE = "/";
 
 function urlBase64ToUint8Array(base64String: string): ArrayBuffer {
   const padding = "=".repeat((4 - (base64String.length % 4)) % 4);
   const base64 = (base64String + padding).replace(/-/g, "+").replace(/_/g, "/");
-  const rawData = window.atob(base64);
+  const rawData = atob(base64);
   const buffer = new ArrayBuffer(rawData.length);
   const view = new Uint8Array(buffer);
   for (let i = 0; i < rawData.length; ++i) {
     view[i] = rawData.charCodeAt(i);
   }
   return buffer;
+}
+
+function describeError(err: unknown): string {
+  if (err instanceof Error) {
+    // DOMException names surface useful push-subscribe error codes
+    const anyErr = err as Error & { name?: string; statusCode?: number };
+    if (anyErr.name === "NotAllowedError") return "Permission to subscribe was denied.";
+    if (anyErr.name === "AbortError") return "Subscription was aborted. Please try again.";
+    if (anyErr.name === "InvalidStateError")
+      return "An existing subscription is in an invalid state. Unsubscribing and retrying…";
+    if (anyErr.name === "NotSupportedError")
+      return "Push notifications are not supported in this browser.";
+    if (anyErr.name === "NotFoundError")
+      return "Service worker not registered yet. Please retry in a moment.";
+    return err.message || err.name || String(err);
+  }
+  return String(err);
 }
 
 export default function NotificationSettingsPage() {
@@ -44,117 +62,163 @@ export default function NotificationSettingsPage() {
   const [notificationState, setNotificationState] = useState<NotificationState>("loading");
   const [swState, setSwState] = useState<SwState>("not-registered");
   const [pushState, setPushState] = useState<PushState>("no-subscription");
+  const [lastError, setLastError] = useState<string | null>(null);
   const [testSent, setTestSent] = useState(false);
   const [testError, setTestError] = useState<string | null>(null);
   const [isPWAInstalled, setIsPWAInstalled] = useState<boolean | null>(null);
 
-  // Check if running as installed PWA
+  // Refs that always read latest values inside async callbacks
+  const pushStateRef = useRef(pushState);
+  pushStateRef.current = pushState;
+
+  // Detect PWA install mode
   useEffect(() => {
+    if (typeof window === "undefined") return;
     const checkPWA = () => {
-      if (typeof window === "undefined") return;
       const isStandalone = window.matchMedia("(display-mode: standalone)").matches;
-      const isFullScreen = (window as any).navigator?.standalone === true;
-      setIsPWAInstalled(isStandalone || isFullScreen || false);
+      const isFullScreen = (window.navigator as Navigator & { standalone?: boolean })?.standalone === true;
+      setIsPWAInstalled(isStandalone || isFullScreen);
     };
     checkPWA();
-    window.matchMedia("(display-mode: standalone)").addEventListener("change", checkPWA);
-    return () => window.matchMedia("(display-mode: standalone)").removeEventListener("change", checkPWA);
+    const mq = window.matchMedia("(display-mode: standalone)");
+    mq.addEventListener("change", checkPWA);
+    return () => mq.removeEventListener("change", checkPWA);
   }, []);
 
-  // Get current service worker registration status
   const getSwRegistration = useCallback(async (): Promise<ServiceWorkerRegistration | null> => {
     if (typeof window === "undefined" || !("serviceWorker" in navigator)) return null;
     try {
-      const registration = await navigator.serviceWorker.getRegistration("/custom-sw.js");
-      return registration || null;
+      return (await navigator.serviceWorker.getRegistration(SW_SCOPE)) || null;
     } catch {
       return null;
     }
   }, []);
 
-  // Get existing push subscription
-  const getExistingSubscription = useCallback(async (): Promise<PushSubscription | null> => {
-    const registration = await getSwRegistration();
-    if (!registration) return null;
-    try {
-      return await registration.pushManager.getSubscription();
-    } catch {
-      return null;
-    }
-  }, [getSwRegistration]);
+  const getExistingSubscription =
+    useCallback(async (): Promise<PushSubscription | null> => {
+      const reg = await getSwRegistration();
+      if (!reg || !("pushManager" in reg)) return null;
+      try {
+        return await reg.pushManager.getSubscription();
+      } catch {
+        return null;
+      }
+    }, [getSwRegistration]);
 
-  // Check initial state
+  // Initial state detection
   useEffect(() => {
+    let cancelled = false;
     const checkState = async () => {
       if (typeof window === "undefined" || !("Notification" in window)) {
-        setNotificationState("unsupported");
+        if (!cancelled) setNotificationState("unsupported");
         return;
       }
 
-      setNotificationState(Notification.permission as NotificationState);
+      if (!cancelled) setNotificationState(Notification.permission as NotificationState);
 
-      // Check service worker
       setSwState("registering");
-      const registration = await getSwRegistration();
-      setSwState(registration ? "registered" : "not-registered");
+      const reg = await getSwRegistration();
+      if (cancelled) return;
+      setSwState(reg ? "registered" : "not-registered");
 
-      // Check push subscription only if permission is granted
       if (Notification.permission === "granted") {
         setPushState("subscribing");
         const sub = await getExistingSubscription();
+        if (cancelled) return;
         setPushState(sub ? "subscribed" : "no-subscription");
       }
     };
-
     checkState();
+    return () => {
+      cancelled = true;
+    };
   }, [getSwRegistration, getExistingSubscription]);
 
-  // Register service worker if not registered
-  const registerServiceWorker = useCallback(async (): Promise<ServiceWorkerRegistration | null> => {
-    if (typeof window === "undefined" || !("serviceWorker" in navigator)) {
-      setSwState("error");
-      return null;
-    }
+  // Register service worker if missing
+  const registerServiceWorker =
+    useCallback(async (): Promise<ServiceWorkerRegistration | null> => {
+      if (typeof window === "undefined" || !("serviceWorker" in navigator)) {
+        setSwState("error");
+        setLastError("Service workers are not supported in this browser.");
+        return null;
+      }
 
-    try {
-      setSwState("registering");
-      const registration = await navigator.serviceWorker.register("/custom-sw.js", { scope: "/" });
-      // Wait for it to activate
-      await new Promise<void>((resolve) => {
-        if (registration.active) {
-          resolve();
-        } else {
-          registration.addEventListener("activate", () => resolve(), { once: true });
-        }
-      });
-      setSwState("registered");
-      return registration;
-    } catch (err) {
-      console.error("Service worker registration failed:", err);
-      setSwState("error");
-      return null;
-    }
-  }, []);
+      try {
+        setSwState("registering");
+        const registration = await navigator.serviceWorker.register(SW_URL, { scope: SW_SCOPE });
 
-  // Subscribe to push notifications
+        // Wait for activation so pushManager is ready
+        await new Promise<void>((resolve) => {
+          if (registration.active) {
+            resolve();
+            return;
+          }
+          const onStateChange = () => {
+            if (registration.active) {
+              registration.removeEventListener("updatefound", onStateChange);
+              resolve();
+            }
+          };
+          registration.addEventListener("updatefound", onStateChange);
+          // Safety timeout — proceed anyway after 3s
+          setTimeout(resolve, 3000);
+        });
+
+        setSwState("registered");
+        setLastError(null);
+        return registration;
+      } catch (err) {
+        const msg = describeError(err);
+        setLastError(`Service worker registration failed: ${msg}`);
+        setSwState("error");
+        return null;
+      }
+    }, []);
+
+  // Subscribe to push — with stale subscription cleanup
   const subscribeToPush = useCallback(async (): Promise<boolean> => {
-    const registration = await getSwRegistration();
-    const swReg = registration || await registerServiceWorker();
-    if (!swReg) return false;
+    if (!VAPID_PUBLIC_KEY) {
+      setLastError(
+        "VAPID public key is not configured. Add NEXT_PUBLIC_VAPID_PUBLIC_KEY to your Vercel environment and redeploy."
+      );
+      setPushState("error");
+      return false;
+    }
 
-    if (!("PushManager" in swReg)) {
+    let reg = await getSwRegistration();
+    if (!reg) {
+      reg = await registerServiceWorker();
+    }
+    if (!reg) {
+      setPushState("error");
+      return false;
+    }
+
+    if (!("PushManager" in reg)) {
+      setLastError("Push API is not supported in this browser.");
       setPushState("error");
       return false;
     }
 
     try {
       setPushState("subscribing");
-      const subscription = await swReg.pushManager.subscribe({
+      setLastError(null);
+
+      // Clear stale subscription first to guarantee a fresh one
+      const existing = await reg.pushManager.getSubscription();
+      if (existing) {
+        try {
+          await existing.unsubscribe();
+        } catch {
+          // Ignore — we'll overwrite on the server side anyway
+        }
+      }
+
+      const subscription = await reg.pushManager.subscribe({
         userVisibleOnly: true,
         applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY),
       });
 
-      // Save to backend
       const response = await fetch("/api/push/subscribe", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -162,7 +226,14 @@ export default function NotificationSettingsPage() {
       });
 
       if (!response.ok) {
-        await subscription.unsubscribe();
+        const data = await response.json().catch(() => ({}));
+        setLastError(`Saving subscription failed: ${data.error || `HTTP ${response.status}`}`);
+        // Roll back the browser-side subscription
+        try {
+          await subscription.unsubscribe();
+        } catch {
+          // ignore
+        }
         setPushState("error");
         return false;
       }
@@ -170,111 +241,112 @@ export default function NotificationSettingsPage() {
       setPushState("subscribed");
       return true;
     } catch (err) {
-      console.error("Push subscription failed:", err);
+      setLastError(`Subscription failed: ${describeError(err)}`);
       setPushState("error");
       return false;
     }
   }, [getSwRegistration, registerServiceWorker]);
 
-  // Unsubscribe from push
   const unsubscribeFromPush = useCallback(async () => {
-    const sub = await getExistingSubscription();
-    if (sub) {
-      await sub.unsubscribe();
+    try {
+      const sub = await getExistingSubscription();
+      if (sub) await sub.unsubscribe();
+    } catch (err) {
+      console.error("Unsubscribe failed:", err);
     }
-    await fetch("/api/push/subscribe", { method: "DELETE" });
+    try {
+      await fetch("/api/push/subscribe", { method: "DELETE" });
+    } catch {
+      // ignore — server row may not exist
+    }
     setPushState("no-subscription");
   }, [getExistingSubscription]);
 
-  // Full enable flow: request permission → register SW → subscribe to push
   const handleEnable = useCallback(async () => {
-    if (!("Notification" in window)) {
+    if (typeof window === "undefined" || !("Notification" in window)) {
       setNotificationState("unsupported");
       return;
     }
-
     setNotificationState("loading");
+    setLastError(null);
     try {
       const permission = await Notification.requestPermission();
       setNotificationState(permission as NotificationState);
-
       if (permission === "granted") {
-        const subscribed = await subscribeToPush();
-        if (!subscribed) {
-          // SW/Push failed but permission was granted — still usable via new Notification()
-          // as a fallback when tab is open
-        }
+        await subscribeToPush();
       }
-    } catch {
+    } catch (err) {
+      setLastError(`Permission request failed: ${describeError(err)}`);
       setNotificationState("denied");
     }
   }, [subscribeToPush]);
 
-  // Send test notification via real push pipeline
-  const handleSendTestNotification = useCallback(async () => {
-    if (Notification.permission !== "granted") return;
-
-    setTestError(null);
-
-    // If push is subscribed, use the real push API
-    if (pushState === "subscribed") {
-      try {
-        const response = await fetch("/api/push/send", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            title: "Ralts",
-            body: t("settings.notification_sent"),
-            tag: "ralts-test",
-          }),
-        });
-
-        if (!response.ok) {
-          const data = await response.json();
-          if (data.code === "EXPIRED") {
-            // Re-subscribe flow
-            setPushState("no-subscription");
-            setTestError("Subscription expired. Please enable notifications again.");
-            return;
-          }
-          throw new Error(data.error || "Send failed");
-        }
-
-        setTestSent(true);
-        setTimeout(() => setTestSent(false), 3000);
-        return;
-      } catch (err) {
-        console.error("Push send failed:", err);
-        setTestError("Push send failed. Trying fallback...");
-      }
-    }
-
-    // Fallback: use new Notification() when tab is in foreground
-    // (this won't work on mobile when tab is backgrounded — that's expected)
-    if (Notification.permission === "granted") {
-      new Notification("Ralts", {
-        body: t("settings.notification_sent"),
-        icon: "/icons/android-chrome-192x192.png",
-        badge: "/icons/android-chrome-192x192.png",
-        tag: "ralts-test",
-      });
-      setTestSent(true);
-      setTimeout(() => setTestSent(false), 3000);
-    }
-  }, [pushState, t]);
-
-  // Re-subscribe if subscription expired
   const handleResubscribe = useCallback(async () => {
     await unsubscribeFromPush();
     await subscribeToPush();
   }, [unsubscribeFromPush, subscribeToPush]);
 
-  const isLoading = notificationState === "loading" || swState === "registering" || pushState === "subscribing";
-  const isReady = notificationState === "granted" && swState === "registered" && pushState === "subscribed";
+  const handleSendTestNotification = useCallback(async () => {
+    setTestError(null);
+    setTestSent(false);
+
+    if (typeof window === "undefined" || Notification.permission !== "granted") {
+      setTestError("Notification permission is required first.");
+      return;
+    }
+
+    // Only send real push when we have a confirmed live subscription
+    if (pushStateRef.current !== "subscribed") {
+      setTestError(
+        "Push subscription is not active yet. Retry the subscription first, then send the test."
+      );
+      return;
+    }
+
+    // Re-verify the subscription is actually live before sending
+    const liveSub = await getExistingSubscription();
+    if (!liveSub) {
+      setPushState("no-subscription");
+      setTestError("Subscription is gone. Please re-enable push first.");
+      return;
+    }
+
+    try {
+      const response = await fetch("/api/push/send", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: "Ralts",
+          body: t("settings.notification_sent"),
+          tag: "ralts-test",
+        }),
+      });
+
+      if (response.ok) {
+        setTestSent(true);
+        setTimeout(() => setTestSent(false), 3000);
+        return;
+      }
+
+      const data = await response.json().catch(() => ({}));
+      if (data.code === "EXPIRED") {
+        setPushState("no-subscription");
+        setTestError("Subscription expired. Please re-enable push first.");
+        return;
+      }
+      setTestError(`Server error: ${data.error || `HTTP ${response.status}`}`);
+    } catch (err) {
+      setTestError(`Network error: ${describeError(err)}`);
+    }
+  }, [t, getExistingSubscription]);
+
+  const isLoading =
+    notificationState === "loading" || swState === "registering" || pushState === "subscribing";
+  const isFullyReady =
+    notificationState === "granted" && swState === "registered" && pushState === "subscribed";
 
   return (
     <div className="min-h-screen pb-24">
-      {/* Header */}
       <div className="px-4 pt-4 pb-2">
         <div className="flex items-center gap-3 mb-4">
           <Button variant="ghost" size="icon" onClick={() => router.back()} className="h-9 w-9">
@@ -285,7 +357,6 @@ export default function NotificationSettingsPage() {
       </div>
 
       <div className="px-4 space-y-4">
-        {/* Unsupported state */}
         {notificationState === "unsupported" && (
           <div className="bg-surface rounded-xl p-6 text-center space-y-3">
             <div className="w-12 h-12 rounded-full bg-surface-elevated flex items-center justify-center mx-auto">
@@ -300,7 +371,6 @@ export default function NotificationSettingsPage() {
           </div>
         )}
 
-        {/* Denied state */}
         {notificationState === "denied" && (
           <div className="bg-surface rounded-xl p-6 text-center space-y-3">
             <div className="w-12 h-12 rounded-full bg-destructive/10 flex items-center justify-center mx-auto">
@@ -309,13 +379,13 @@ export default function NotificationSettingsPage() {
             <div>
               <p className="text-sm font-medium text-text-primary">Notifications Blocked</p>
               <p className="text-xs text-text-secondary mt-1">
-                Ralts cannot send notifications because permission was denied. Go to your browser settings and allow notifications for this site, then refresh.
+                Ralts cannot send notifications because permission was denied. Open your browser
+                settings, allow notifications for this site, then come back and refresh.
               </p>
             </div>
           </div>
         )}
 
-        {/* Loading state */}
         {isLoading && notificationState === "loading" && (
           <div className="bg-surface rounded-xl p-6 text-center space-y-3">
             <div className="w-12 h-12 rounded-full bg-surface-elevated flex items-center justify-center mx-auto animate-pulse">
@@ -325,139 +395,122 @@ export default function NotificationSettingsPage() {
           </div>
         )}
 
-        {/* Default / granted — show the full diagnostic UI */}
         {(notificationState === "default" || notificationState === "granted") && (
           <>
             {/* Diagnostic status card */}
             <div className="bg-surface rounded-xl p-5 space-y-4">
-              <p className="text-xs font-medium text-text-secondary uppercase tracking-wider">Status</p>
+              <p className="text-xs font-medium text-text-secondary uppercase tracking-wider">
+                Status
+              </p>
 
               {/* Permission status */}
-              <div className="flex items-center gap-3">
-                <div className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 ${
-                  notificationState === "granted" ? "bg-success/10" : "bg-surface-elevated"
-                }`}>
-                  {notificationState === "granted" ? (
-                    <CheckCircle2 className="h-4 w-4 text-success" strokeWidth={1.5} />
-                  ) : (
-                    <Bell className="h-4 w-4 text-text-tertiary" strokeWidth={1.5} />
-                  )}
-                </div>
-                <div className="flex-1 min-w-0">
-                  <p className="text-xs font-medium text-text-primary">Permission</p>
-                  <p className="text-xs text-text-secondary capitalize">{notificationState}</p>
-                </div>
-              </div>
+              <StatusRow
+                label="Permission"
+                value={
+                  notificationState === "granted"
+                    ? "Granted"
+                    : notificationState === "default"
+                      ? "Not yet asked"
+                      : notificationState
+                }
+                state={notificationState === "granted" ? "ok" : "pending"}
+              />
 
               {/* Service worker status */}
-              <div className="flex items-center gap-3">
-                <div className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 ${
-                  swState === "registered" ? "bg-success/10" : "bg-surface-elevated"
-                }`}>
-                  {swState === "registered" ? (
-                    <CheckCircle2 className="h-4 w-4 text-success" strokeWidth={1.5} />
-                  ) : swState === "registering" ? (
-                    <RefreshCw className="h-4 w-4 text-text-tertiary animate-spin" strokeWidth={1.5} />
-                  ) : swState === "error" ? (
-                    <AlertCircle className="h-4 w-4 text-destructive" strokeWidth={1.5} />
-                  ) : (
-                    <WifiOff className="h-4 w-4 text-text-tertiary" strokeWidth={1.5} />
-                  )}
-                </div>
-                <div className="flex-1 min-w-0">
-                  <p className="text-xs font-medium text-text-primary">Service Worker</p>
-                  <p className="text-xs text-text-secondary">
-                    {swState === "registered" ? "Registered"
-                      : swState === "registering" ? "Registering..."
-                      : swState === "error" ? "Registration failed"
-                      : "Not registered"}
-                  </p>
-                </div>
-                {swState === "not-registered" && (
-                  <button
-                    onClick={registerServiceWorker}
-                    className="text-xs text-accent hover:underline"
-                  >
-                    Register
-                  </button>
-                )}
-              </div>
+              <StatusRow
+                label="Service Worker"
+                value={
+                  swState === "registered"
+                    ? "Registered"
+                    : swState === "registering"
+                      ? "Registering..."
+                      : swState === "error"
+                        ? "Registration failed"
+                        : "Not registered"
+                }
+                state={
+                  swState === "registered"
+                    ? "ok"
+                    : swState === "registering"
+                      ? "pending"
+                      : "error"
+                }
+                action={
+                  swState === "not-registered" || swState === "error"
+                    ? { label: "Register", onClick: registerServiceWorker }
+                    : undefined
+                }
+              />
 
               {/* Push subscription status */}
-              <div className="flex items-center gap-3">
-                <div className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 ${
-                  pushState === "subscribed" ? "bg-success/10" : "bg-surface-elevated"
-                }`}>
-                  {pushState === "subscribed" ? (
-                    <CheckCircle2 className="h-4 w-4 text-success" strokeWidth={1.5} />
-                  ) : pushState === "subscribing" ? (
-                    <RefreshCw className="h-4 w-4 text-text-tertiary animate-spin" strokeWidth={1.5} />
-                  ) : pushState === "error" ? (
-                    <AlertCircle className="h-4 w-4 text-destructive" strokeWidth={1.5} />
-                  ) : (
-                    <WifiOff className="h-4 w-4 text-text-tertiary" strokeWidth={1.5} />
-                  )}
-                </div>
-                <div className="flex-1 min-w-0">
-                  <p className="text-xs font-medium text-text-primary">Push Subscription</p>
-                  <p className="text-xs text-text-secondary">
-                    {pushState === "subscribed" ? "Active — will receive push notifications"
-                      : pushState === "subscribing" ? "Subscribing..."
-                      : pushState === "error" ? "Failed — try again"
-                      : "No active subscription"}
-                  </p>
-                </div>
-                {pushState === "error" && (
-                  <button
-                    onClick={handleResubscribe}
-                    className="text-xs text-accent hover:underline"
-                  >
-                    Retry
-                  </button>
-                )}
-              </div>
+              <StatusRow
+                label="Push Subscription"
+                value={
+                  pushState === "subscribed"
+                    ? "Active — device will receive pushes"
+                    : pushState === "subscribing"
+                      ? "Subscribing..."
+                      : pushState === "error"
+                        ? "Failed — see error below"
+                        : "No active subscription"
+                }
+                state={
+                  pushState === "subscribed" ? "ok" : pushState === "subscribing" ? "pending" : "error"
+                }
+                action={
+                  pushState === "error" || pushState === "no-subscription"
+                    ? { label: "Retry", onClick: handleResubscribe }
+                    : undefined
+                }
+              />
 
               {/* PWA install status */}
-              <div className="flex items-center gap-3">
-                <div className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 ${
-                  isPWAInstalled ? "bg-accent/10" : "bg-surface-elevated"
-                }`}>
-                  {isPWAInstalled ? (
+              <StatusRow
+                label="App Mode"
+                value={
+                  isPWAInstalled === null
+                    ? "Checking..."
+                    : isPWAInstalled
+                      ? "Installed PWA — notifications most reliable"
+                      : "Browser tab — install to home screen for best results"
+                }
+                state={isPWAInstalled ? "info" : "pending"}
+                icon={
+                  isPWAInstalled ? (
                     <Smartphone className="h-4 w-4 text-accent" strokeWidth={1.5} />
                   ) : (
                     <Monitor className="h-4 w-4 text-text-tertiary" strokeWidth={1.5} />
-                  )}
-                </div>
-                <div className="flex-1 min-w-0">
-                  <p className="text-xs font-medium text-text-primary">App Mode</p>
-                  <p className="text-xs text-text-secondary">
-                    {isPWAInstalled ? "Installed PWA — notifications most reliable"
-                      : "Browser tab — for best results, install to home screen"}
-                  </p>
-                </div>
-              </div>
+                  )
+                }
+              />
 
-              {/* Re-subscribe button when subscribed but permission might have issues */}
-              {pushState === "no-subscription" && notificationState === "granted" && (
-                <button
-                  onClick={subscribeToPush}
-                  className="w-full text-xs text-accent hover:underline text-center"
-                >
-                  Re-subscribe to push notifications
-                </button>
+              {lastError && (
+                <div className="flex items-start gap-2 bg-destructive/10 rounded-lg p-3">
+                  <AlertCircle className="h-4 w-4 text-destructive mt-0.5 shrink-0" strokeWidth={1.5} />
+                  <p className="text-xs text-destructive break-words">{lastError}</p>
+                </div>
               )}
             </div>
 
-            {/* Permission action */}
+            {/* Permission action card */}
             <div className="bg-surface rounded-xl p-5 space-y-4">
               <div className="flex items-start gap-3">
-                <div className={`w-10 h-10 rounded-full flex items-center justify-center shrink-0 ${
-                  notificationState === "granted" ? "bg-accent/10" : "bg-surface-elevated"
-                }`}>
-                  <Bell className={`h-5 w-5 ${notificationState === "granted" ? "text-accent" : "text-text-tertiary"}`} strokeWidth={1.5} />
+                <div
+                  className={`w-10 h-10 rounded-full flex items-center justify-center shrink-0 ${
+                    notificationState === "granted" ? "bg-accent/10" : "bg-surface-elevated"
+                  }`}
+                >
+                  <Bell
+                    className={`h-5 w-5 ${
+                      notificationState === "granted" ? "text-accent" : "text-text-tertiary"
+                    }`}
+                    strokeWidth={1.5}
+                  />
                 </div>
                 <div className="flex-1 min-w-0">
-                  <p className="text-sm font-medium text-text-primary">{t("settings.enable_notifications")}</p>
+                  <p className="text-sm font-medium text-text-primary">
+                    {t("settings.enable_notifications")}
+                  </p>
                   <p className="text-xs text-text-secondary mt-0.5">
                     {notificationState === "granted"
                       ? "Ralts has permission to send you notifications."
@@ -466,16 +519,25 @@ export default function NotificationSettingsPage() {
                 </div>
               </div>
 
-              {/* Permission status badge */}
-              <div className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium ${
-                notificationState === "granted"
-                  ? "bg-success/10 text-success"
-                  : "bg-surface-elevated text-text-secondary"
-              }`}>
-                {notificationState === "granted" ? (
+              {/* Permission status badge — only "Enabled" when actually subscribed */}
+              <div
+                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium ${
+                  isFullyReady
+                    ? "bg-success/10 text-success"
+                    : notificationState === "granted"
+                      ? "bg-warning/10 text-warning"
+                      : "bg-surface-elevated text-text-secondary"
+                }`}
+              >
+                {isFullyReady ? (
                   <>
                     <CheckCircle2 className="h-3 w-3" strokeWidth={1.5} />
                     Enabled
+                  </>
+                ) : notificationState === "granted" ? (
+                  <>
+                    <AlertCircle className="h-3 w-3" strokeWidth={1.5} />
+                    Permission granted — subscription not active
                   </>
                 ) : (
                   <>
@@ -485,17 +547,27 @@ export default function NotificationSettingsPage() {
                 )}
               </div>
 
-              {/* Action button */}
               {notificationState === "default" && (
                 <Button
                   onClick={handleEnable}
+                  disabled={isLoading}
                   className="w-full h-10 bg-accent text-white hover:bg-accent/90"
                 >
                   Enable Notifications
                 </Button>
               )}
 
-              {notificationState === "granted" && (
+              {notificationState === "granted" && !isFullyReady && (
+                <Button
+                  onClick={handleResubscribe}
+                  disabled={isLoading}
+                  className="w-full h-10 bg-accent text-white hover:bg-accent/90"
+                >
+                  {pushState === "subscribing" ? "Subscribing..." : "Activate Push"}
+                </Button>
+              )}
+
+              {notificationState === "granted" && isFullyReady && (
                 <div className="space-y-2">
                   <p className="text-xs text-text-tertiary text-center">
                     To disable, revoke permission in your browser settings.
@@ -507,27 +579,30 @@ export default function NotificationSettingsPage() {
             {/* Test notification */}
             {notificationState === "granted" && (
               <div className="bg-surface rounded-xl p-5 space-y-4">
-                <p className="text-xs font-medium text-text-secondary uppercase tracking-wider">Test Notification</p>
+                <p className="text-xs font-medium text-text-secondary uppercase tracking-wider">
+                  Test Notification
+                </p>
 
                 <div className="flex items-center gap-3">
                   <div className="w-10 h-10 rounded-full bg-accent/10 flex items-center justify-center">
                     <Bell className="h-5 w-5 text-accent" strokeWidth={1.5} />
                   </div>
                   <div className="flex-1">
-                    <p className="text-sm font-medium text-text-primary">{t("settings.test_notification")}</p>
+                    <p className="text-sm font-medium text-text-primary">
+                      {t("settings.test_notification")}
+                    </p>
                     <p className="text-xs text-text-secondary">
                       {pushState === "subscribed"
-                        ? "Sends a real push notification to this device."
-                        : "Subscribing first, then sending test..."}
+                        ? "Sends a real push to this device."
+                        : "Activate push first, then send a test."}
                     </p>
                   </div>
                 </div>
 
-                {/* Success / error feedback */}
                 {testSent && (
                   <div className="flex items-center gap-1.5 text-xs text-success">
                     <CheckCircle2 className="h-3 w-3" strokeWidth={1.5} />
-                    Test notification sent!
+                    Test notification sent. It may take a few seconds to arrive.
                   </div>
                 )}
                 {testError && (
@@ -537,13 +612,13 @@ export default function NotificationSettingsPage() {
                   </div>
                 )}
 
-                {/* PWA not installed warning */}
                 {!isPWAInstalled && pushState === "subscribed" && (
                   <div className="flex items-start gap-2 bg-accent/5 rounded-lg p-3">
                     <Info className="h-4 w-4 text-accent mt-0.5 shrink-0" strokeWidth={1.5} />
                     <p className="text-xs text-text-secondary">
-                      For the most reliable notifications on mobile, install Ralts to your home screen
-                      (tap the share button → "Add to Home Screen"). Notifications work better as an installed app.
+                      For the most reliable notifications on mobile, install Ralts to your home
+                      screen (tap the share button → &quot;Add to Home Screen&quot;). Notifications
+                      work better as an installed app.
                     </p>
                   </div>
                 )}
@@ -551,23 +626,30 @@ export default function NotificationSettingsPage() {
                 <Button
                   variant="outline"
                   onClick={handleSendTestNotification}
-                  disabled={isLoading}
+                  disabled={isLoading || pushState !== "subscribed"}
                   className="w-full h-10"
                 >
-                  {t("settings.test_notification")}
+                  {pushState === "subscribed"
+                    ? t("settings.test_notification")
+                    : "Activate push to send a test"}
                 </Button>
               </div>
             )}
 
-            {/* How to install PWA */}
             {isPWAInstalled === false && notificationState !== "granted" && (
               <div className="bg-surface rounded-xl p-5 space-y-3">
-                <p className="text-xs font-medium text-text-secondary uppercase tracking-wider">For Best Reliability</p>
+                <p className="text-xs font-medium text-text-secondary uppercase tracking-wider">
+                  For Best Reliability
+                </p>
                 <div className="flex items-start gap-2">
-                  <Smartphone className="h-4 w-4 text-text-tertiary mt-0.5 shrink-0" strokeWidth={1.5} />
+                  <Smartphone
+                    className="h-4 w-4 text-text-tertiary mt-0.5 shrink-0"
+                    strokeWidth={1.5}
+                  />
                   <p className="text-xs text-text-secondary">
                     On mobile, notifications are most reliable when Ralts is installed as a PWA.
-                    After enabling above, tap the share button in your browser → "Add to Home Screen".
+                    After enabling above, tap the share button in your browser → &quot;Add to Home
+                    Screen&quot;.
                   </p>
                 </div>
               </div>
@@ -575,6 +657,56 @@ export default function NotificationSettingsPage() {
           </>
         )}
       </div>
+    </div>
+  );
+}
+
+function StatusRow({
+  label,
+  value,
+  state,
+  action,
+  icon,
+}: {
+  label: string;
+  value: string;
+  state: "ok" | "pending" | "error" | "info";
+  action?: { label: string; onClick: () => void };
+  icon?: React.ReactNode;
+}) {
+  const bg =
+    state === "ok"
+      ? "bg-success/10"
+      : state === "error"
+        ? "bg-destructive/10"
+        : state === "info"
+          ? "bg-accent/10"
+          : "bg-surface-elevated";
+  const defaultIcon =
+    state === "ok" ? (
+      <CheckCircle2 className="h-4 w-4 text-success" strokeWidth={1.5} />
+    ) : state === "error" ? (
+      <AlertCircle className="h-4 w-4 text-destructive" strokeWidth={1.5} />
+    ) : state === "pending" ? (
+      <RefreshCw className="h-4 w-4 text-text-tertiary animate-spin" strokeWidth={1.5} />
+    ) : (
+      <WifiOff className="h-4 w-4 text-text-tertiary" strokeWidth={1.5} />
+    );
+
+  return (
+    <div className="flex items-center gap-3">
+      <div className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 ${bg}`}>
+        {icon ?? defaultIcon}
+      </div>
+      <div className="flex-1 min-w-0">
+        <p className="text-xs font-medium text-text-primary">{label}</p>
+        <p className="text-xs text-text-secondary">{value}</p>
+      </div>
+      {action && (
+        <button onClick={action.onClick} className="text-xs text-accent hover:underline shrink-0">
+          {action.label}
+        </button>
+      )}
     </div>
   );
 }
