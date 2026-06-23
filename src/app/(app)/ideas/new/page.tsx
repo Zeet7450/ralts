@@ -6,6 +6,7 @@ import { useState } from "react";
 import { ArrowLeft } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { createClient } from "@/lib/supabase/client";
 import { useAuthStore } from "@/stores/auth-store";
@@ -66,12 +67,13 @@ export default function NewIdeaPage() {
 
         <div className="space-y-1.5">
           <Label htmlFor="description" className="text-xs font-medium text-text-secondary">Description</Label>
-          <Input
+          <Textarea
             id="description"
             value={description}
             onChange={(e) => setDescription(e.target.value)}
             placeholder={t("common.optional")}
-            className="h-11 bg-surface border-border"
+            rows={4}
+            className="bg-surface border-border resize-none"
           />
         </div>
 

@@ -32,8 +32,12 @@ export default function TasksPage() {
       key={task.id}
       className="flex items-center gap-3 py-3 border-b border-border last:border-0"
     >
+      {/* Checkbox — stops propagation so tapping the row navigates, checkbox toggles completion */}
       <button
-        onClick={() => completeTask(task.id)}
+        onClick={(e) => {
+          e.stopPropagation();
+          completeTask(task.id);
+        }}
         className={`w-5 h-5 rounded-full border-2 flex items-center justify-center shrink-0 transition-all duration-150 ${
           task.is_completed
             ? "bg-accent border-accent"
@@ -46,7 +50,12 @@ export default function TasksPage() {
           </svg>
         )}
       </button>
-      <div className="flex-1 min-w-0">
+
+      {/* Row — clickable to edit */}
+      <Link
+        href={`/tasks/${task.id}`}
+        className="flex-1 min-w-0 active:bg-surface-elevated rounded-md -mx-1 px-1"
+      >
         <p className={`text-sm ${task.is_completed ? "line-through text-text-tertiary" : "text-text-primary"}`}>
           {task.title}
         </p>
@@ -63,7 +72,7 @@ export default function TasksPage() {
             </span>
           )}
         </div>
-      </div>
+      </Link>
     </div>
   );
 
@@ -109,7 +118,7 @@ export default function TasksPage() {
         <div className="flex items-center justify-between mb-3">
           <h1 className="text-xl font-semibold">{t("nav.tasks")}</h1>
           <Link href="/tasks/new">
-            <Button size="sm" className="bg-accent text-white">
+            <Button size="sm" className="bg-accent text-white h-8 w-8 p-0">
               <Plus className="h-4 w-4" strokeWidth={1.5} />
             </Button>
           </Link>

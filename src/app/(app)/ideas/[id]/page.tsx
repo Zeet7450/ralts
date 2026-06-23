@@ -6,6 +6,7 @@ import { useEffect, useState } from "react";
 import { ArrowLeft, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { useIdeasStore } from "@/stores/ideas-store";
 import type { Idea } from "@/types";
@@ -112,12 +113,13 @@ export default function IdeaDetailPage() {
 
         <div className="space-y-1.5">
           <Label htmlFor="description" className="text-xs font-medium text-text-secondary">Description</Label>
-          <Input
+          <Textarea
             id="description"
             value={description}
             onChange={(e) => setDescription(e.target.value)}
             placeholder={t("common.optional")}
-            className="h-11 bg-surface border-border"
+            rows={4}
+            className="bg-surface border-border resize-none"
           />
         </div>
 
