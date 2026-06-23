@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import { useTranslations } from "next-intl";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -9,28 +10,28 @@ interface MonthPickerProps {
   onChange: (value: string) => void;
 }
 
-const MONTHS = [
-  "January", "February", "March", "April", "May", "June",
-  "July", "August", "September", "October", "November", "December",
-];
+const MONTH_KEYS = [
+  "january", "february", "march", "april", "may", "june",
+  "july", "august", "september", "october", "november", "december",
+] as const;
 
 export function MonthPicker({ value, onChange }: MonthPickerProps) {
+  const t = useTranslations();
   const [isOpen, setIsOpen] = React.useState(false);
   const [viewYear, setViewYear] = React.useState(() => {
     if (value) return parseInt(value.split("-")[0], 10);
     return new Date().getFullYear();
   });
-
-  const currentYear = new Date().getFullYear();
-  const years = Array.from({ length: 5 }, (_, i) => currentYear - 2 + i);
+  const dropdownRef = React.useRef<HTMLDivElement>(null);
 
   const selectedYear = value ? parseInt(value.split("-")[0], 10) : viewYear;
   const selectedMonth = value ? parseInt(value.split("-")[1], 10) - 1 : new Date().getMonth();
 
+  // Locale-aware month name — uses active next-intl locale
+  const getMonthName = (idx: number) => t(`months.${MONTH_KEYS[idx]}`);
+
   const displayValue = value
-    ? new Intl.DateTimeFormat("en-US", { month: "long", year: "numeric" }).format(
-        new Date(parseInt(value.split("-")[0], 10), parseInt(value.split("-")[1], 10) - 1, 1)
-      )
+    ? `${getMonthName(selectedMonth)} ${selectedYear}`
     : "";
 
   const handleSelect = (month: number) => {
@@ -39,92 +40,91 @@ export function MonthPicker({ value, onChange }: MonthPickerProps) {
     setIsOpen(false);
   };
 
+  // Close on outside click
+  React.useEffect(() => {
+    if (!isOpen) return;
+    const handleClick = (e: MouseEvent) => {
+      if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
+        setIsOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handleClick);
+    return () => document.removeEventListener("mousedown", handleClick);
+  }, [isOpen]);
+
   return (
-    <>
+    <div ref={dropdownRef} className="relative w-full">
+      {/* Trigger button */}
       <button
         type="button"
-        onClick={() => setIsOpen(true)}
+        onClick={() => setIsOpen((v) => !v)}
         className={cn(
           "w-full h-9 rounded-lg border border-border bg-surface px-3 text-sm text-left",
-          "flex items-center justify-between",
+          "flex items-center justify-between gap-2",
           "hover:border-accent/50 transition-colors",
           "focus:outline-none focus:ring-2 focus:ring-accent focus:ring-offset-1 focus:ring-offset-background",
           value ? "text-text-primary" : "text-text-tertiary"
         )}
       >
-        <span>{displayValue || "Select month"}</span>
-        <svg className="h-4 w-4 text-text-tertiary shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-          <path strokeLinecap="round" strokeLinejoin="round" d="M6.75 3v2.25M17.25 3v2.25M3 18.75V7.5a2.25 2.25 0 012.25-2.25h13.5A2.25 2.25 0 0121 7.5v11.25m-18 0A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75m-18 0v-7.5A2.25 2.25 0 015.25 9h13.5A2.25 2.25 0 0121 11.25v7.5" />
+        <span className="truncate">{displayValue || t("finance.select_month")}</span>
+        <svg
+          className={cn("h-3.5 w-3.5 text-text-tertiary shrink-0 transition-transform duration-200", isOpen && "rotate-180")}
+          fill="none"
+          viewBox="0 0 24 24"
+          stroke="currentColor"
+          strokeWidth={1.5}
+        >
+          <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5" />
         </svg>
       </button>
 
+      {/* Inline dropdown panel */}
       {isOpen && (
-        <div className="fixed inset-0 z-50 flex items-end justify-center">
-          {/* Overlay */}
-          <div className="absolute inset-0 bg-black/50" onClick={() => setIsOpen(false)} />
+        <div className="absolute top-full left-0 right-0 mt-1.5 z-50 bg-surface border border-border rounded-xl shadow-lg overflow-hidden animate-in fade-in zoom-in-95 duration-150">
+          {/* Year navigation row */}
+          <div className="flex items-center justify-between px-3 py-2 border-b border-border">
+            <button
+              type="button"
+              onClick={() => setViewYear((y) => y - 1)}
+              className="w-7 h-7 flex items-center justify-center rounded-md text-text-secondary hover:text-text-primary hover:bg-surface-elevated transition-colors"
+            >
+              <ChevronLeft className="h-3.5 w-3.5" strokeWidth={1.5} />
+            </button>
+            <span className="text-xs font-semibold text-text-primary tabular-nums">{viewYear}</span>
+            <button
+              type="button"
+              onClick={() => setViewYear((y) => y + 1)}
+              className="w-7 h-7 flex items-center justify-center rounded-md text-text-secondary hover:text-text-primary hover:bg-surface-elevated transition-colors"
+            >
+              <ChevronRight className="h-3.5 w-3.5" strokeWidth={1.5} />
+            </button>
+          </div>
 
-          {/* Sheet */}
-          <div className="relative w-full max-w-sm bg-surface rounded-t-2xl p-5 pb-6 safe-area-pb animate-in slide-in-from-bottom duration-300">
-            {/* Year navigation */}
-            <div className="flex items-center justify-between mb-4">
-              <button
-                type="button"
-                onClick={() => setViewYear(y => y - 1)}
-                className="w-9 h-9 flex items-center justify-center rounded-lg text-text-secondary hover:text-text-primary hover:bg-surface-elevated transition-colors"
-              >
-                <ChevronLeft className="h-4 w-4" strokeWidth={1.5} />
-              </button>
-              <span className="text-sm font-semibold text-text-primary">{viewYear}</span>
-              <button
-                type="button"
-                onClick={() => setViewYear(y => y + 1)}
-                className="w-9 h-9 flex items-center justify-center rounded-lg text-text-secondary hover:text-text-primary hover:bg-surface-elevated transition-colors"
-              >
-                <ChevronRight className="h-4 w-4" strokeWidth={1.5} />
-              </button>
-            </div>
+          {/* Month grid — 3 columns, 4 rows */}
+          <div className="grid grid-cols-3 gap-0.5 p-1.5">
+            {MONTH_KEYS.map((key, idx) => {
+              const isSelected = viewYear === selectedYear && idx === selectedMonth;
+              const monthName = getMonthName(idx);
 
-            {/* Month grid — 3 columns, 4 rows */}
-            <div className="grid grid-cols-3 gap-1.5">
-              {MONTHS.map((month, idx) => {
-                const isSelected = viewYear === selectedYear && idx === selectedMonth;
-                const short = month.slice(0, 3);
-
-                return (
-                  <button
-                    key={month}
-                    type="button"
-                    onClick={() => handleSelect(idx)}
-                    className={cn(
-                      "h-11 rounded-lg text-sm font-medium transition-colors",
-                      isSelected
-                        ? "bg-accent text-white"
-                        : "bg-surface-elevated text-text-primary hover:bg-accent/20 hover:text-accent"
-                    )}
-                  >
-                    {short}
-                  </button>
-                );
-              })}
-            </div>
-
-            {/* This month shortcut */}
-            <div className="mt-3 pt-3 border-t border-border">
-              <button
-                type="button"
-                onClick={() => {
-                  const now = new Date();
-                  setViewYear(now.getFullYear());
-                  handleSelect(now.getMonth());
-                }}
-                className="w-full text-center text-xs text-accent hover:text-accent/80 transition-colors py-1"
-              >
-                This month
-              </button>
-            </div>
+              return (
+                <button
+                  key={key}
+                  type="button"
+                  onClick={() => handleSelect(idx)}
+                  className={cn(
+                    "h-9 w-full flex items-center justify-center rounded-md text-[11px] font-medium transition-colors",
+                    isSelected
+                      ? "bg-accent text-white"
+                      : "text-text-primary hover:bg-surface-elevated"
+                  )}
+                >
+                  {monthName}
+                </button>
+              );
+            })}
           </div>
         </div>
       )}
-    </>
+    </div>
   );
 }

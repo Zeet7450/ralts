@@ -7,6 +7,20 @@
     "reflection": "Refleksi",
     "settings": "Pengaturan"
   },
+  "months": {
+    "january": "Januari",
+    "february": "Februari",
+    "march": "Maret",
+    "april": "April",
+    "may": "Mei",
+    "june": "Juni",
+    "july": "Juli",
+    "august": "Agustus",
+    "september": "September",
+    "october": "Oktober",
+    "november": "November",
+    "december": "Desember"
+  },
   "auth": {
     "login_title": "Masuk ke RALTS",
     "email_placeholder": "email@anda.com",
@@ -28,6 +42,7 @@
   "finance": {
     "transactions": "Transaksi",
     "add_transaction": "Tambah Transaksi",
+    "select_month": "Pilih bulan",
     "income": "Pemasukan",
     "expense": "Pengeluaran",
     "category": "Kategori",

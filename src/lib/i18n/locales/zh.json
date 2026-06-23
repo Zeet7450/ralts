@@ -7,6 +7,20 @@
     "reflection": "反思",
     "settings": "设置"
   },
+  "months": {
+    "january": "一月",
+    "february": "二月",
+    "march": "三月",
+    "april": "四月",
+    "may": "五月",
+    "june": "六月",
+    "july": "七月",
+    "august": "八月",
+    "september": "九月",
+    "october": "十月",
+    "november": "十一月",
+    "december": "十二月"
+  },
   "auth": {
     "login_title": "登录 RALTS",
     "email_placeholder": "your@email.com",
@@ -28,6 +42,7 @@
   "finance": {
     "transactions": "交易记录",
     "add_transaction": "添加交易",
+    "select_month": "选择月份",
     "income": "收入",
     "expense": "支出",
     "category": "类别",

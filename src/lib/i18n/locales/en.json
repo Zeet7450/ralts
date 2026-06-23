@@ -7,6 +7,20 @@
     "reflection": "Reflection",
     "settings": "Settings"
   },
+  "months": {
+    "january": "January",
+    "february": "February",
+    "march": "March",
+    "april": "April",
+    "may": "May",
+    "june": "June",
+    "july": "July",
+    "august": "August",
+    "september": "September",
+    "october": "October",
+    "november": "November",
+    "december": "December"
+  },
   "auth": {
     "login_title": "Sign in to RALTS",
     "email_placeholder": "your@email.com",
@@ -28,6 +42,7 @@
   "finance": {
     "transactions": "Transactions",
     "add_transaction": "Add Transaction",
+    "select_month": "Select month",
     "income": "Income",
     "expense": "Expense",
     "category": "Category",
