@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { useTranslations } from "next-intl";
 import Link from "next/link";
-import { Plus, TrendingUp, TrendingDown, PiggyBank, Target, BarChart3 } from "lucide-react";
+import { Plus, TrendingUp, TrendingDown, PiggyBank, Target } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { MonthPicker } from "@/components/ui/month-picker";
 import { useFinanceStore } from "@/stores/finance-store";
@@ -68,16 +68,8 @@ export default function FinancePage() {
           </div>
         </div>
 
-        {/* Quick actions — 3 compact columns */}
-        <div className="grid grid-cols-3 gap-2">
-          <Link href="/finance/budgets">
-            <div className="bg-surface rounded-xl p-3 flex flex-col items-center gap-1.5 cursor-pointer active:scale-[0.98] transition-transform">
-              <div className="w-8 h-8 rounded-full bg-accent/10 flex items-center justify-center">
-                <BarChart3 className="h-4 w-4 text-accent" strokeWidth={1.5} />
-              </div>
-              <p className="text-[11px] font-medium text-text-primary text-center leading-tight">{t("finance.budgets")}</p>
-            </div>
-          </Link>
+        {/* Quick actions — 2 compact columns */}
+        <div className="grid grid-cols-2 gap-2">
           <Link href="/finance/goals">
             <div className="bg-surface rounded-xl p-3 flex flex-col items-center gap-1.5 cursor-pointer active:scale-[0.98] transition-transform">
               <div className="w-8 h-8 rounded-full bg-accent/10 flex items-center justify-center">
