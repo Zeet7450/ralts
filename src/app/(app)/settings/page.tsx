@@ -1,9 +1,9 @@
 "use client";
 
 import { useTranslations } from "next-intl";
+import Link from "next/link";
 import { Moon, Sun, Globe, Bell, LogOut, ChevronRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Switch } from "@/components/ui/switch";
 import { useThemeStore } from "@/stores/theme-store";
 import { useLocaleStore } from "@/stores/locale-store";
 import { createClient } from "@/lib/supabase/client";
@@ -100,9 +100,9 @@ export default function SettingsPage() {
           </div>
         </div>
 
-        {/* Notifications */}
-        <div className="bg-surface rounded-lg">
-          <div className="flex items-center justify-between p-4">
+        {/* Notifications — clickable row */}
+        <Link href="/settings/notifications">
+          <div className="bg-surface rounded-lg flex items-center justify-between p-4 active:bg-surface-elevated cursor-pointer transition-colors">
             <div className="flex items-center gap-3">
               <Bell className="h-5 w-5 text-text-secondary" strokeWidth={1.5} />
               <div>
@@ -110,9 +110,9 @@ export default function SettingsPage() {
                 <p className="text-xs text-text-tertiary">{t("settings.enable_notifications")}</p>
               </div>
             </div>
-            <Switch />
+            <ChevronRight className="h-4 w-4 text-text-tertiary" strokeWidth={1.5} />
           </div>
-        </div>
+        </Link>
 
         {/* Sign Out */}
         <button

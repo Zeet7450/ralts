@@ -50,7 +50,8 @@
     "top_categories": "主要类别",
     "edit_transaction": "编辑交易",
     "delete_transaction": "删除交易",
-    "confirm_delete": "确定要删除此交易吗？"
+    "confirm_delete": "确定要删除此交易吗？",
+    "transaction_detail": "交易详情"
   },
   "ideas": {
     "all_ideas": "所有想法",
@@ -140,7 +141,8 @@
     "add": "添加",
     "update": "更新",
     "confirm": "确认",
-    "optional": "可选"
+    "optional": "可选",
+    "confirm_delete": "确定要删除吗？此操作无法撤销。"
   },
   "pwa": {
     "install_title": "安装 RALTS",

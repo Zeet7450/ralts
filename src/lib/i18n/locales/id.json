@@ -50,7 +50,8 @@
     "top_categories": "Kategori Utama",
     "edit_transaction": "Edit Transaksi",
     "delete_transaction": "Hapus Transaksi",
-    "confirm_delete": "Apakah Anda yakin ingin menghapus transaksi ini?"
+    "confirm_delete": "Apakah Anda yakin ingin menghapus transaksi ini?",
+    "transaction_detail": "Detail Transaksi"
   },
   "ideas": {
     "all_ideas": "Semua Ide",
@@ -140,7 +141,8 @@
     "add": "Tambah",
     "update": "Perbarui",
     "confirm": "Konfirmasi",
-    "optional": "opsional"
+    "optional": "opsional",
+    "confirm_delete": "Apakah Anda yakin ingin menghapus ini? Tindakan ini tidak dapat dibatalkan."
   },
   "pwa": {
     "install_title": "Pasang RALTS",
