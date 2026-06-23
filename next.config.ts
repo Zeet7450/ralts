@@ -6,6 +6,7 @@ const withPWA = withPWAInit({
   dest: "public",
   disable: process.env.NODE_ENV === "development",
   register: true,
+  sw: "custom-sw.js", // Use our custom service worker
   workboxOptions: {
     disableDevLogs: true,
     runtimeCaching: [
