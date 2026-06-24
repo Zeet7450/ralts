@@ -13,34 +13,54 @@ import {
   RefreshCw,
   Smartphone,
   Monitor,
-  Info,
+  ShieldAlert,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
-type NotificationState = "unsupported" | "denied" | "granted" | "default" | "loading";
+// Granular, capability-based states. We no longer conflate "Notification API
+// missing" with "Push API missing" — they are independent capabilities and
+// the UI must surface each one on its own.
+type NotificationSupport =
+  | "available" // new Notification() works
+  | "no-api" // Notification constructor is not on window
+  | "insecure" // window.isSecureContext === false
+  | "iframe" // running inside a frame without permission policy
+  | "ios-needs-pwa"; // iOS Safari in regular browser tab
+
+type PushSupport =
+  | "available" // pushManager.subscribe() can succeed (SW + PushManager + HTTPS + VAPID)
+  | "no-vapid" // SW + PushManager + HTTPS, but NEXT_PUBLIC_VAPID_PUBLIC_KEY missing
+  | "no-sw" // serviceWorker not exposed
+  | "insecure" // not a secure context
+  | "no-push-manager"; // browser doesn't expose PushManager at all
+
+type NotificationState = "denied" | "granted" | "default" | "unsupported";
 type SwState = "not-registered" | "registering" | "registered" | "error";
-type PushState = "no-subscription" | "subscribing" | "subscribed" | "error";
+type PushState = "no-subscription" | "subscribing" | "subscribed" | "error" | "not-configured";
 
 // VAPID public key — exposed client-side by NEXT_PUBLIC_ prefix
 const VAPID_PUBLIC_KEY = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY || "";
 const SW_URL = "/sw.js";
 const SW_SCOPE = "/";
 
-// Detail diagnostic info for every failure point — printed to console AND shown
-// in the UI so the user sees the real underlying cause, not a generic message.
 type Diagnostic = {
   userAgent: string;
   isSecureContext: boolean;
-  hasNotification: boolean;
+  isTopLevel: boolean;
+  isInIframe: boolean;
+  hasNotificationApi: boolean;
   hasServiceWorker: boolean;
-  hasPushManager: boolean;
+  hasPushManagerGlobal: boolean;
   isStandalone: boolean;
   isIOS: boolean;
-  isIOSPWAEligible: boolean;
   vapidKeyPresent: boolean;
   swControllerActive: boolean;
   swScriptUrl: string | null;
   permission: NotificationPermission | "unavailable";
+  notificationSupport: NotificationSupport;
+  pushSupport: PushSupport;
+  notificationSupportReason: string | null;
+  pushSupportReason: string | null;
   permissionError: string | null;
   subscribeError: string | null;
   sendError: string | null;
@@ -85,50 +105,210 @@ function isIOSDevice(): boolean {
   return /iPad|iPhone|iPod/.test(navigator.userAgent) && !("MSStream" in window);
 }
 
+function describeNotificationSupport(s: NotificationSupport): string {
+  switch (s) {
+    case "available":
+      return "Available — `new Notification(...)` works";
+    case "insecure":
+      return "Blocked — not a secure context";
+    case "iframe":
+      return "Blocked — inside an iframe";
+    case "ios-needs-pwa":
+      return "Hidden — install as PWA on iOS";
+    case "no-api":
+      return "Not exposed by this browser";
+  }
+}
+
+function describePushSupport(s: PushSupport, isSubscribed: boolean): string {
+  switch (s) {
+    case "available":
+      return isSubscribed
+        ? "Subscribed — server can send pushes"
+        : "Available — not yet subscribed";
+    case "no-vapid":
+      return "Disabled — NEXT_PUBLIC_VAPID_PUBLIC_KEY missing (local notifications still work)";
+    case "insecure":
+      return "Blocked — requires HTTPS";
+    case "no-sw":
+      return "Blocked — no Service Worker";
+    case "no-push-manager":
+      return "Not supported by this browser";
+  }
+}
+
+/**
+ * Probe the browser's notification capability in order of likelihood so the
+ * UI can show the *exact* missing prerequisite instead of a generic message.
+ *
+ * Rules:
+ *  - `'Notification' in window` is the prerequisite for the Notification API.
+ *    Chrome, Firefox, Edge, Safari 16+, and Opera all expose it on https or
+ *    localhost. If it is missing, the browser (or an in-app WebView) does
+ *    NOT support notifications at all.
+ *  - `window.isSecureContext` must be true. On Chrome and Firefox the
+ *    Notification constructor is on window even on http, but every call is
+ *    silently dropped and `requestPermission()` is a no-op that returns
+ *    "denied". Treat that as "insecure" — not as "unsupported".
+ *  - iOS Safari only exposes `Notification` once the page is launched as an
+ *    installed PWA. In regular browser mode `Notification` is undefined —
+ *    we treat that as "install the PWA" rather than "unsupported".
+ *  - Iframes without an `allow="notifications"` permission policy will fail
+ *    silently; the constructor exists but `requestPermission` rejects with
+ *    NotAllowedError.
+ */
+function detectNotificationSupport(): {
+  support: NotificationSupport;
+  reason: string | null;
+} {
+  if (typeof window === "undefined") {
+    return { support: "no-api", reason: "window is undefined (SSR)." };
+  }
+  const isIOS = isIOSDevice();
+  const isStandalone =
+    window.matchMedia?.("(display-mode: standalone)").matches ||
+    (window.navigator as Navigator & { standalone?: boolean })?.standalone === true;
+
+  // iOS Safari in regular browser tab: Notification is intentionally undefined
+  // until installed as a PWA. Don't say "unsupported" — tell the user how to
+  // fix it.
+  if (isIOS && !isStandalone && !("Notification" in window)) {
+    return {
+      support: "ios-needs-pwa",
+      reason:
+        "iOS Safari only exposes the Notification API when Ralts is launched from the Home Screen.",
+    };
+  }
+
+  if (!("Notification" in window)) {
+    return {
+      support: "no-api",
+      reason:
+        "This browser does not expose the Notification constructor. Use a modern Chrome, Firefox, Edge, or Safari.",
+    };
+  }
+
+  if (!window.isSecureContext) {
+    return {
+      support: "insecure",
+      reason:
+        "Notifications require a secure context (HTTPS or http://localhost). The current origin is not secure, so notifications will be silently blocked.",
+    };
+  }
+
+  if (window.self !== window.top) {
+    // We're in an iframe. Notifications from inside iframes require an
+    // `allow="notifications"` permission policy on the embedding <iframe>.
+    return {
+      support: "iframe",
+      reason:
+        'Notifications cannot be requested from inside an iframe unless the parent grants `allow="notifications"`.',
+    };
+  }
+
+  return { support: "available", reason: null };
+}
+
+/**
+ * Push support is independent from notification support. Push needs:
+ *  - Secure context (HTTPS or localhost)
+ *  - serviceWorker in navigator
+ *  - PushManager on the serviceWorker registration
+ *  - A non-empty VAPID public key
+ * If any of those are missing we still keep local notifications available —
+ * we just can't subscribe to a server push.
+ */
+function detectPushSupport(opts: {
+  hasServiceWorker: boolean;
+  hasPushManagerGlobal: boolean;
+}): { support: PushSupport; reason: string | null } {
+  if (typeof window === "undefined") {
+    return { support: "no-sw", reason: "SSR." };
+  }
+  if (!window.isSecureContext) {
+    return {
+      support: "insecure",
+      reason: "Push requires HTTPS or localhost.",
+    };
+  }
+  if (!opts.hasServiceWorker) {
+    return {
+      support: "no-sw",
+      reason: "Service Worker API is not exposed by this browser.",
+    };
+  }
+  if (!opts.hasPushManagerGlobal) {
+    return {
+      support: "no-push-manager",
+      reason:
+        "Push API is not exposed by this browser. Local notifications will still work.",
+    };
+  }
+  if (!VAPID_PUBLIC_KEY) {
+    return {
+      support: "no-vapid",
+      reason:
+        "NEXT_PUBLIC_VAPID_PUBLIC_KEY is not configured — server-push is disabled, but local notifications will still work.",
+    };
+  }
+  return { support: "available", reason: null };
+}
+
 export default function NotificationSettingsPage() {
   const t = useTranslations();
   const router = useRouter();
 
-  const [notificationState, setNotificationState] = useState<NotificationState>("loading");
-  const [swState, setSwState] = useState<SwState>("not-registered");
-  const [pushState, setPushState] = useState<PushState>("no-subscription");
+  const [notificationSupport, setNotificationSupport] =
+    useState<NotificationSupport>(() => {
+      if (typeof window === "undefined") return "available";
+      return detectNotificationSupport().support;
+    });
+  const [notificationSupportReason, setNotificationSupportReason] = useState<
+    string | null
+  >(() => {
+    if (typeof window === "undefined") return null;
+    return detectNotificationSupport().reason;
+  });
+  const [pushSupport, setPushSupport] = useState<PushSupport>(() => {
+    if (typeof window === "undefined") return "available";
+    const hasServiceWorker = "serviceWorker" in navigator;
+    const hasPushManagerGlobal =
+      "PushManager" in (window as unknown as { PushManager?: unknown });
+    return detectPushSupport({ hasServiceWorker, hasPushManagerGlobal }).support;
+  });
+
+  const [permission, setPermission] = useState<NotificationState>("default");
+  const [swState, setSwState] = useState<SwState>(() => {
+    if (typeof window === "undefined") return "not-registered";
+    const hasServiceWorker = "serviceWorker" in navigator;
+    const hasPushManagerGlobal =
+      "PushManager" in (window as unknown as { PushManager?: unknown });
+    const { support } = detectPushSupport({ hasServiceWorker, hasPushManagerGlobal });
+    return support === "available" ? "registering" : "not-registered";
+  });
+  const [pushState, setPushState] = useState<PushState>(() => {
+    if (typeof window === "undefined") return "no-subscription";
+    const hasServiceWorker = "serviceWorker" in navigator;
+    const hasPushManagerGlobal =
+      "PushManager" in (window as unknown as { PushManager?: unknown });
+    const { support } = detectPushSupport({ hasServiceWorker, hasPushManagerGlobal });
+    return support === "no-vapid" ? "not-configured" : "no-subscription";
+  });
   const [lastError, setLastError] = useState<string | null>(null);
   const [testSent, setTestSent] = useState(false);
   const [testError, setTestError] = useState<string | null>(null);
   const [isPWAInstalled, setIsPWAInstalled] = useState<boolean | null>(null);
-  const [diag, setDiag] = useState<Diagnostic | null>(() => {
-    // Seed the diagnostic snapshot from the browser environment so the UI
-    // can render even before the async state-detection effect runs.
-    if (typeof window === "undefined") return null;
-    const isIOS = isIOSDevice();
-    const hasNotification = "Notification" in window;
-    return {
-      userAgent: navigator.userAgent,
-      isSecureContext: window.isSecureContext,
-      hasNotification,
-      hasServiceWorker: "serviceWorker" in navigator,
-      hasPushManager: "PushManager" in (window as unknown as { PushManager?: unknown }),
-      isStandalone:
-        window.matchMedia("(display-mode: standalone)").matches ||
-        (window.navigator as Navigator & { standalone?: boolean })?.standalone === true,
-      isIOS,
-      isIOSPWAEligible: isIOS,
-      vapidKeyPresent: Boolean(VAPID_PUBLIC_KEY),
-      swControllerActive: Boolean(navigator.serviceWorker?.controller),
-      swScriptUrl: navigator.serviceWorker?.controller?.scriptURL ?? null,
-      permission: hasNotification ? Notification.permission : "unavailable",
-      permissionError: null,
-      subscribeError: null,
-      sendError: null,
-      lastEndpoint: null,
-    };
-  });
+  const [diag, setDiag] = useState<Diagnostic | null>(null);
 
   // Refs that always read latest values inside async callbacks
   const pushStateRef = useRef(pushState);
   useEffect(() => {
     pushStateRef.current = pushState;
   }, [pushState]);
+  const pushSupportRef = useRef(pushSupport);
+  useEffect(() => {
+    pushSupportRef.current = pushSupport;
+  }, [pushSupport]);
 
   // Detect PWA install mode
   useEffect(() => {
@@ -168,40 +348,18 @@ export default function NotificationSettingsPage() {
       }
     }, [getSwRegistration]);
 
-  // Initial state detection — captures every failure reason for diagnostics
+  // Async follow-ups: register the SW (when push is configured) and read the
+  // existing subscription. Synchronous capability detection is handled in the
+  // lazy useState initializers above.
   useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    // If push isn't configured we don't even attempt SW registration — local
+    // notifications still work via the Notification API.
+    if (pushSupport !== "available") return;
+
     let cancelled = false;
-
-    const checkState = async () => {
-      if (typeof window === "undefined") return;
-
-      // Distinguish three "unsupported" cases so the UI can give the right
-      // remediation instead of a generic message:
-      //   1. Notification API missing entirely (old desktop browsers, some in-app WebViews)
-      //   2. Notification present but PushManager missing
-      //   3. iOS Safari in regular browser mode — Notification is only
-      //      exposed once the site is installed as a PWA. Don't say
-      //      "unsupported"; say "install to home screen".
-      const hasNotification = "Notification" in window;
-      const hasServiceWorker = "serviceWorker" in navigator;
-
-      if (!hasNotification || !hasServiceWorker) {
-        if (!cancelled) {
-          setNotificationState("unsupported");
-          updateDiag({
-            permissionError: !hasNotification
-              ? "Notification API is not exposed by this browser."
-              : "Service Worker API is not exposed by this browser.",
-          });
-        }
-        return;
-      }
-
-      if (!cancelled) {
-        setNotificationState(Notification.permission as NotificationState);
-      }
-
-      setSwState("registering");
+    (async () => {
       const reg = await getSwRegistration();
       if (cancelled) return;
       setSwState(reg ? "registered" : "not-registered");
@@ -213,13 +371,12 @@ export default function NotificationSettingsPage() {
         setPushState(sub ? "subscribed" : "no-subscription");
         if (sub) updateDiag({ lastEndpoint: sub.endpoint });
       }
-    };
+    })();
 
-    checkState();
     return () => {
       cancelled = true;
     };
-  }, [getSwRegistration, getExistingSubscription, updateDiag]);
+  }, [pushSupport, getSwRegistration, getExistingSubscription, updateDiag]);
 
   // Register service worker if missing
   const registerServiceWorker =
@@ -227,7 +384,7 @@ export default function NotificationSettingsPage() {
       if (typeof window === "undefined" || !("serviceWorker" in navigator)) {
         setSwState("error");
         setLastError(
-          "Service workers are not supported in this browser. Use a modern Chrome, Firefox, Edge, or Safari."
+          "Service workers are not supported in this browser. Local notifications still work; only server push is disabled."
         );
         return null;
       }
@@ -281,7 +438,7 @@ export default function NotificationSettingsPage() {
   const subscribeToPush = useCallback(async (): Promise<boolean> => {
     if (!VAPID_PUBLIC_KEY) {
       const msg =
-        "VAPID public key is not configured. Add NEXT_PUBLIC_VAPID_PUBLIC_KEY to your Vercel environment and redeploy.";
+        "VAPID public key is not configured. Add NEXT_PUBLIC_VAPID_PUBLIC_KEY to your Vercel environment and redeploy. Local notifications still work — only server push is disabled.";
       setLastError(msg);
       updateDiag({ vapidKeyPresent: false, subscribeError: msg });
       setPushState("error");
@@ -420,11 +577,17 @@ export default function NotificationSettingsPage() {
   }, [getExistingSubscription, updateDiag]);
 
   const handleEnable = useCallback(async () => {
-    if (typeof window === "undefined" || !("Notification" in window)) {
-      setNotificationState("unsupported");
+    if (typeof window === "undefined") return;
+
+    // Capability gate — show the real reason instead of silently doing nothing.
+    if (notificationSupport !== "available") {
+      setLastError(
+        notificationSupportReason ??
+          "Notifications are not available in this browser context."
+      );
       return;
     }
-    setNotificationState("loading");
+
     setLastError(null);
     try {
       // Promise.race so an unresponsive permission prompt can't hang the UI forever.
@@ -433,102 +596,177 @@ export default function NotificationSettingsPage() {
         setTimeout(() => resolve("default" as NotificationPermission), 15_000)
       );
       const permission = await Promise.race([permissionPromise, timeoutPromise]);
-      setNotificationState(permission as NotificationState);
+      setPermission(permission as NotificationState);
       if (permission === "granted") {
-        await subscribeToPush();
+        // Only attempt push subscription if push is actually configured.
+        if (pushSupport === "available") {
+          await subscribeToPush();
+        }
       } else if (permission === "denied") {
         setLastError(
           "Notification permission was denied. Open your browser settings, allow notifications for this site, then refresh."
         );
       }
     } catch (err) {
-      setLastError(`Permission request failed: ${describeError(err)}`);
-      setNotificationState("denied");
+      const msg = describeError(err);
+      console.error("[notifications] requestPermission failed:", err);
+      setLastError(`Permission request failed: ${msg}`);
+      setPermission("denied");
     }
-  }, [subscribeToPush]);
+  }, [notificationSupport, notificationSupportReason, pushSupport, subscribeToPush]);
 
   const handleResubscribe = useCallback(async () => {
     await unsubscribeFromPush();
-    await subscribeToPush();
-  }, [unsubscribeFromPush, subscribeToPush]);
+    if (pushSupport === "available") {
+      await subscribeToPush();
+    }
+  }, [unsubscribeFromPush, subscribeToPush, pushSupport]);
 
+  /**
+   * Fire a local notification using the browser's Notification API. Tries the
+   * ServiceWorkerRegistration.showNotification path first when a SW is
+   * registered (so the notification persists even if the tab is closed),
+   * then falls back to `new Notification(...)`.
+   *
+   * This is what makes "Test Notification" work on supported browsers
+   * regardless of whether push is configured — Chrome, Firefox, Edge, and
+   * Safari 16+ all support this without a service worker or VAPID keys.
+   */
+  const fireLocalNotification = useCallback(
+    (title: string, bodyText: string, tag: string) => {
+      try {
+        if (
+          "serviceWorker" in navigator &&
+          navigator.serviceWorker.controller &&
+          typeof ServiceWorkerRegistration !== "undefined" &&
+          typeof (ServiceWorkerRegistration.prototype as { showNotification?: unknown })
+            .showNotification === "function"
+        ) {
+          navigator.serviceWorker.ready
+            .then((reg) => reg.showNotification(title, { body: bodyText, tag }))
+            .catch((err) => {
+              console.warn("[notifications] SW showNotification failed, falling back", err);
+              new Notification(title, { body: bodyText, tag });
+            });
+        } else {
+          new Notification(title, { body: bodyText, tag });
+        }
+      } catch (err) {
+        const msg = describeError(err);
+        console.error("[notifications] local notification failed:", err);
+        setTestError(`Local notification failed: ${msg}`);
+        updateDiag({ sendError: msg });
+      }
+    },
+    [updateDiag]
+  );
+
+  /**
+   * Test notification path. The previous version only allowed a real push,
+   * which meant "Test Notification" was unusable when push wasn't configured.
+   * We now:
+   *   1. Try the server push if push is subscribed.
+   *   2. Fall back to a local Notification when permission is granted but
+   *      server push is unavailable or not configured. This is the "make
+   *      local desktop notification work again" requirement.
+   *   3. Surface every failure with the real underlying reason.
+   */
   const handleSendTestNotification = useCallback(async () => {
     setTestError(null);
     setTestSent(false);
 
-    if (typeof window === "undefined" || Notification.permission !== "granted") {
+    if (typeof window === "undefined") return;
+
+    if (permission !== "granted") {
       setTestError("Notification permission is required first.");
       return;
     }
 
-    // Only send real push when we have a confirmed live subscription
-    if (pushStateRef.current !== "subscribed") {
-      setTestError(
-        "Push subscription is not active yet. Retry the subscription first, then send the test."
-      );
-      return;
-    }
+    const title = "Ralts";
+    const bodyText = t("settings.notification_sent");
+    const localTag = "ralts-test-local";
+    const tag = "ralts-test";
 
-    // Re-verify the subscription is actually live before sending
-    const liveSub = await getExistingSubscription();
-    if (!liveSub) {
-      setPushState("no-subscription");
-      setTestError("Subscription is gone. Please re-enable push first.");
-      return;
-    }
+    // First choice: live server push (only when subscribed AND push is configured).
+    const canUseServerPush =
+      pushSupport === "available" && pushStateRef.current === "subscribed";
 
-    try {
-      const response = await fetch("/api/push/send", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          title: "Ralts",
-          body: t("settings.notification_sent"),
-          tag: "ralts-test",
-        }),
-        redirect: "manual",
-      });
-
-      if (response.type === "opaqueredirect") {
-        setTestError(
-          "Server redirected the request — your session is no longer valid. Refresh the page and sign in again."
-        );
-        return;
-      }
-
-      if (response.ok) {
-        setTestSent(true);
-        setTimeout(() => setTestSent(false), 3000);
-        return;
-      }
-
-      const data = (await response.json().catch(() => ({}))) as {
-        error?: string;
-        code?: string;
-      };
-      if (data.code === "EXPIRED") {
+    if (canUseServerPush) {
+      const liveSub = await getExistingSubscription();
+      if (!liveSub) {
         setPushState("no-subscription");
-        setTestError("Subscription expired. Please re-enable push first.");
-        return;
+        // Fall through to local fallback.
+      } else {
+        try {
+          const response = await fetch("/api/push/send", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ title, body: bodyText, tag }),
+            redirect: "manual",
+          });
+
+          if (response.type === "opaqueredirect") {
+            // Auth lost — fall back to a local notification so the user can
+            // still verify the Notification API works.
+            fireLocalNotification(title, bodyText, localTag);
+            setTestSent(true);
+            setTimeout(() => setTestSent(false), 3000);
+            return;
+          }
+
+          if (response.ok) {
+            setTestSent(true);
+            setTimeout(() => setTestSent(false), 3000);
+            return;
+          }
+
+          const data = (await response.json().catch(() => ({}))) as {
+            error?: string;
+            code?: string;
+          };
+          if (data.code === "EXPIRED") {
+            setPushState("no-subscription");
+            setTestError("Subscription expired. Please re-enable push first.");
+            return;
+          }
+          const detail = data.error || `HTTP ${response.status}`;
+          setTestError(`Server error: ${detail}`);
+          updateDiag({ sendError: `HTTP ${response.status} — ${detail}` });
+          return;
+        } catch (err) {
+          setTestError(`Network error: ${describeError(err)}`);
+          updateDiag({ sendError: describeError(err) });
+          return;
+        }
       }
-      const detail = data.error || `HTTP ${response.status}`;
-      setTestError(`Server error: ${detail}`);
-      updateDiag({ sendError: `HTTP ${response.status} — ${detail}` });
-    } catch (err) {
-      setTestError(`Network error: ${describeError(err)}`);
-      updateDiag({ sendError: describeError(err) });
     }
-  }, [t, getExistingSubscription, updateDiag]);
+
+    // Fallback: local notification via the Notification API. This works on
+    // any supported browser (Chrome, Firefox, Edge, Safari 16+) without
+    // needing VAPID or a service worker.
+    fireLocalNotification(title, bodyText, localTag);
+    setTestSent(true);
+    setTimeout(() => setTestSent(false), 3000);
+  }, [permission, pushSupport, t, getExistingSubscription, updateDiag, fireLocalNotification]);
+
+  // ─── Derived UI flags ─────────────────────────────────────────────────────
+
+  const notificationsReady =
+    notificationSupport === "available" && permission === "granted";
+  const pushReady =
+    notificationsReady &&
+    pushSupport === "available" &&
+    pushState === "subscribed";
 
   const isLoading =
-    notificationState === "loading" || swState === "registering" || pushState === "subscribing";
-  const isFullyReady =
-    notificationState === "granted" && swState === "registered" && pushState === "subscribed";
+    swState === "registering" || pushState === "subscribing";
 
-  // Decide whether we should show an iOS-specific "install first" prompt rather
-  // than the generic "unsupported" message.
   const showIOSInstallPrompt =
-    diag?.isIOS === true && diag.isStandalone === false && diag.hasNotification === false;
+    notificationSupport === "ios-needs-pwa";
+  const showFullyUnsupported =
+    notificationSupport === "no-api";
+  const showInsecureHint = notificationSupport === "insecure";
+  const showIframeHint = notificationSupport === "iframe";
 
   return (
     <div className="min-h-screen pb-24">
@@ -542,7 +780,7 @@ export default function NotificationSettingsPage() {
       </div>
 
       <div className="px-4 space-y-4">
-        {notificationState === "unsupported" && !showIOSInstallPrompt && (
+        {showFullyUnsupported && (
           <div className="bg-surface rounded-xl p-6 text-center space-y-3">
             <div className="w-12 h-12 rounded-full bg-surface-elevated flex items-center justify-center mx-auto">
               <AlertCircle className="h-6 w-6 text-text-tertiary" strokeWidth={1.5} />
@@ -550,14 +788,8 @@ export default function NotificationSettingsPage() {
             <div>
               <p className="text-sm font-medium text-text-primary">Notifications Not Supported</p>
               <p className="text-xs text-text-secondary mt-1">
-                Your browser does not expose the Notification API. Use a modern Chrome, Firefox,
-                Edge, or Safari 16.4+.
+                {notificationSupportReason ?? "This browser does not expose the Notification API."}
               </p>
-              {diag?.permissionError && (
-                <p className="text-[11px] text-text-tertiary mt-2 break-words">
-                  Reason: {diag.permissionError}
-                </p>
-              )}
             </div>
           </div>
         )}
@@ -568,17 +800,50 @@ export default function NotificationSettingsPage() {
               <Smartphone className="h-6 w-6 text-accent" strokeWidth={1.5} />
             </div>
             <div>
-              <p className="text-sm font-medium text-text-primary">Install Ralts to use push</p>
+              <p className="text-sm font-medium text-text-primary">
+                Install Ralts to use notifications
+              </p>
               <p className="text-xs text-text-secondary mt-1">
-                On iPhone and iPad, push notifications only work when Ralts is added to your Home
-                Screen. Tap the share button in Safari → &quot;Add to Home Screen&quot; — then open
-                Ralts from the Home Screen and return here.
+                On iPhone and iPad, the Notification API is only exposed when Ralts is launched
+                from the Home Screen. Tap the share button in Safari → &quot;Add to Home
+                Screen&quot;, then open Ralts from the Home Screen and return here.
               </p>
             </div>
           </div>
         )}
 
-        {notificationState === "denied" && (
+        {showInsecureHint && (
+          <div className="bg-surface rounded-xl p-6 text-center space-y-3">
+            <div className="w-12 h-12 rounded-full bg-warning/10 flex items-center justify-center mx-auto">
+              <ShieldAlert className="h-6 w-6 text-warning" strokeWidth={1.5} />
+            </div>
+            <div>
+              <p className="text-sm font-medium text-text-primary">HTTPS required</p>
+              <p className="text-xs text-text-secondary mt-1">
+                Notifications require a secure context. The current origin is{" "}
+                <span className="font-mono">{typeof window !== "undefined" ? window.location.origin : "—"}</span>{" "}
+                — open the HTTPS version of this URL (or use http://localhost during development).
+              </p>
+            </div>
+          </div>
+        )}
+
+        {showIframeHint && (
+          <div className="bg-surface rounded-xl p-6 text-center space-y-3">
+            <div className="w-12 h-12 rounded-full bg-warning/10 flex items-center justify-center mx-auto">
+              <ShieldAlert className="h-6 w-6 text-warning" strokeWidth={1.5} />
+            </div>
+            <div>
+              <p className="text-sm font-medium text-text-primary">Cannot request from an iframe</p>
+              <p className="text-xs text-text-secondary mt-1">
+                {notificationSupportReason ??
+                  'Open this page in its own tab, or ask the embedding site to grant `allow="notifications"`.'}
+              </p>
+            </div>
+          </div>
+        )}
+
+        {permission === "denied" && (
           <div className="bg-surface rounded-xl p-6 text-center space-y-3">
             <div className="w-12 h-12 rounded-full bg-destructive/10 flex items-center justify-center mx-auto">
               <BellOff className="h-6 w-6 text-destructive" strokeWidth={1.5} />
@@ -587,22 +852,29 @@ export default function NotificationSettingsPage() {
               <p className="text-sm font-medium text-text-primary">Notifications Blocked</p>
               <p className="text-xs text-text-secondary mt-1">
                 Ralts cannot send notifications because permission was denied. Open your browser
-                settings, allow notifications for this site, then come back and refresh.
+                settings (usually under Privacy → Notifications or Site Settings), allow
+                notifications for this site, then come back and refresh.
               </p>
             </div>
           </div>
         )}
 
-        {isLoading && notificationState === "loading" && (
+        {permission === "default" && notificationSupport === "available" && (
           <div className="bg-surface rounded-xl p-6 text-center space-y-3">
             <div className="w-12 h-12 rounded-full bg-surface-elevated flex items-center justify-center mx-auto animate-pulse">
               <Bell className="h-6 w-6 text-text-tertiary" strokeWidth={1.5} />
             </div>
-            <p className="text-sm text-text-secondary">Checking notification status...</p>
+            <p className="text-sm text-text-secondary">
+              Tap <span className="font-medium text-text-primary">Enable Notifications</span> below
+              to grant permission.
+            </p>
           </div>
         )}
 
-        {(notificationState === "default" || notificationState === "granted" || showIOSInstallPrompt) && (
+        {(notificationSupport === "available" ||
+          // On iOS we still want to render the test-instructions and diagnostics
+          // even though the Notification API itself is hidden.
+          showIOSInstallPrompt) && (
           <>
             {/* Diagnostic status card */}
             <div className="bg-surface rounded-xl p-5 space-y-4">
@@ -610,76 +882,53 @@ export default function NotificationSettingsPage() {
                 Status
               </p>
 
-              {/* Permission status */}
+              <StatusRow
+                label="Notification API"
+                value={describeNotificationSupport(notificationSupport)}
+                state={
+                  notificationSupport === "available"
+                    ? "ok"
+                    : notificationSupport === "ios-needs-pwa"
+                      ? "info"
+                      : "error"
+                }
+              />
+
+              <StatusRow
+                label="Push (server)"
+                value={describePushSupport(pushSupport, pushState === "subscribed")}
+                state={
+                  pushSupport === "available"
+                    ? pushState === "subscribed"
+                      ? "ok"
+                      : "pending"
+                    : pushSupport === "no-vapid"
+                      ? "info"
+                      : "error"
+                }
+                action={
+                  pushSupport === "available" &&
+                  (pushState === "error" || pushState === "no-subscription")
+                    ? { label: "Subscribe", onClick: handleResubscribe }
+                    : undefined
+                }
+              />
+
               <StatusRow
                 label="Permission"
                 value={
-                  notificationState === "granted"
+                  permission === "granted"
                     ? "Granted"
-                    : notificationState === "default"
+                    : permission === "default"
                       ? "Not yet asked"
-                      : notificationState
+                      : permission === "denied"
+                        ? "Denied at browser level"
+                        : "Unavailable"
                 }
-                state={notificationState === "granted" ? "ok" : "pending"}
+                state={permission === "granted" ? "ok" : permission === "denied" ? "error" : "pending"}
               />
 
-              {/* Service worker status */}
-              <StatusRow
-                label="Service Worker"
-                value={
-                  swState === "registered"
-                    ? diag?.swControllerActive
-                      ? "Registered and controlling"
-                      : "Registered (waiting to control)"
-                    : swState === "registering"
-                      ? "Registering..."
-                      : swState === "error"
-                        ? "Registration failed"
-                        : "Not registered"
-                }
-                state={
-                  swState === "registered"
-                    ? diag?.swControllerActive
-                      ? "ok"
-                      : "pending"
-                    : swState === "registering"
-                      ? "pending"
-                      : "error"
-                }
-                action={
-                  swState === "not-registered" || swState === "error"
-                    ? { label: "Register", onClick: registerServiceWorker }
-                    : undefined
-                }
-              />
-
-              {/* Push subscription status */}
-              <StatusRow
-                label="Push Subscription"
-                value={
-                  pushState === "subscribed"
-                    ? "Active — device will receive pushes"
-                    : pushState === "subscribing"
-                      ? "Subscribing..."
-                      : pushState === "error"
-                        ? "Failed — see error below"
-                        : "No active subscription"
-                }
-                state={
-                  pushState === "subscribed"
-                    ? "ok"
-                    : pushState === "subscribing"
-                      ? "pending"
-                      : "error"
-                }
-                action={
-                  pushState === "error" || pushState === "no-subscription"
-                    ? { label: "Retry", onClick: handleResubscribe }
-                    : undefined
-                }
-              />
-
-              {/* PWA install status */}
+              {/* PWA install status — informational only */}
               <StatusRow
                 label="App Mode"
                 value={
@@ -687,9 +936,7 @@ export default function NotificationSettingsPage() {
                     ? "Checking..."
                     : isPWAInstalled
                       ? "Installed PWA — notifications most reliable"
-                      : diag?.isIOS
-                        ? "Browser tab — install to Home Screen for push to work"
-                        : "Browser tab — install to home screen for best results"
+                      : "Browser tab — install to home screen for best results"
                 }
                 state={isPWAInstalled ? "info" : "pending"}
                 icon={
@@ -717,12 +964,12 @@ export default function NotificationSettingsPage() {
               <div className="flex items-start gap-3">
                 <div
                   className={`w-10 h-10 rounded-full flex items-center justify-center shrink-0 ${
-                    notificationState === "granted" ? "bg-accent/10" : "bg-surface-elevated"
+                    notificationsReady ? "bg-accent/10" : "bg-surface-elevated"
                   }`}
                 >
                   <Bell
                     className={`h-5 w-5 ${
-                      notificationState === "granted" ? "text-accent" : "text-text-tertiary"
+                      notificationsReady ? "text-accent" : "text-text-tertiary"
                     }`}
                     strokeWidth={1.5}
                   />
@@ -732,32 +979,31 @@ export default function NotificationSettingsPage() {
                     {t("settings.enable_notifications")}
                   </p>
                   <p className="text-xs text-text-secondary mt-0.5">
-                    {notificationState === "granted"
+                    {notificationsReady
                       ? "Ralts has permission to send you notifications."
                       : "Enable notifications to receive updates from Ralts."}
                   </p>
                 </div>
               </div>
 
-              {/* Permission status badge — only "Enabled" when actually subscribed */}
               <div
                 className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium ${
-                  isFullyReady
+                  pushReady
                     ? "bg-success/10 text-success"
-                    : notificationState === "granted"
+                    : notificationsReady
                       ? "bg-warning/10 text-warning"
                       : "bg-surface-elevated text-text-secondary"
                 }`}
               >
-                {isFullyReady ? (
+                {pushReady ? (
                   <>
                     <CheckCircle2 className="h-3 w-3" strokeWidth={1.5} />
-                    Enabled
+                    Push enabled
                   </>
-                ) : notificationState === "granted" ? (
+                ) : notificationsReady ? (
                   <>
                     <AlertCircle className="h-3 w-3" strokeWidth={1.5} />
-                    Permission granted — subscription not active
+                    Local notifications only
                   </>
                 ) : (
                   <>
@@ -767,37 +1013,37 @@ export default function NotificationSettingsPage() {
                 )}
               </div>
 
-              {notificationState === "default" && (
+              {permission === "default" && (
                 <Button
                   onClick={handleEnable}
-                  disabled={isLoading}
+                  disabled={isLoading || notificationSupport !== "available"}
                   className="w-full h-10 bg-accent text-white hover:bg-accent/90"
                 >
                   Enable Notifications
                 </Button>
               )}
 
-              {notificationState === "granted" && !isFullyReady && (
-                <Button
-                  onClick={handleResubscribe}
-                  disabled={isLoading}
-                  className="w-full h-10 bg-accent text-white hover:bg-accent/90"
-                >
-                  {pushState === "subscribing" ? "Subscribing..." : "Activate Push"}
-                </Button>
-              )}
+              {permission === "granted" &&
+                pushSupport === "available" &&
+                pushState !== "subscribed" && (
+                  <Button
+                    onClick={handleResubscribe}
+                    disabled={isLoading}
+                    className="w-full h-10 bg-accent text-white hover:bg-accent/90"
+                  >
+                    {pushState === "subscribing" ? "Subscribing..." : "Activate Push"}
+                  </Button>
+                )}
 
-              {notificationState === "granted" && isFullyReady && (
-                <div className="space-y-2">
-                  <p className="text-xs text-text-tertiary text-center">
-                    To disable, revoke permission in your browser settings.
-                  </p>
-                </div>
+              {permission === "granted" && (
+                <p className="text-xs text-text-tertiary text-center">
+                  To disable, revoke permission in your browser settings.
+                </p>
               )}
             </div>
 
-            {/* Test notification */}
-            {notificationState === "granted" && (
+            {/* Test notification — works for local OR push */}
+            {permission === "granted" && (
               <div className="bg-surface rounded-xl p-5 space-y-4">
                 <p className="text-xs font-medium text-text-secondary uppercase tracking-wider">
                   Test Notification
@@ -812,9 +1058,11 @@ export default function NotificationSettingsPage() {
                       {t("settings.test_notification")}
                     </p>
                     <p className="text-xs text-text-secondary">
-                      {pushState === "subscribed"
-                        ? "Sends a real push to this device."
-                        : "Activate push first, then send a test."}
+                      {pushReady
+                        ? "Sends a real server push to this device."
+                        : pushSupport === "available"
+                          ? "Sends a local notification immediately. Activate Push above to test server delivery."
+                          : "Sends a local notification — server push is disabled because NEXT_PUBLIC_VAPID_PUBLIC_KEY is not configured."}
                     </p>
                   </div>
                 </div>
@@ -832,43 +1080,35 @@ export default function NotificationSettingsPage() {
                   </div>
                 )}
 
-                {!isPWAInstalled && pushState === "subscribed" && (
-                  <div className="flex items-start gap-2 bg-accent/5 rounded-lg p-3">
-                    <Info className="h-4 w-4 text-accent mt-0.5 shrink-0" strokeWidth={1.5} />
-                    <p className="text-xs text-text-secondary">
-                      For the most reliable notifications on mobile, install Ralts to your home
-                      screen (tap the share button → &quot;Add to Home Screen&quot;). Notifications
-                      work better as an installed app.
-                    </p>
-                  </div>
-                )}
-
                 <Button
                   variant="outline"
                   onClick={handleSendTestNotification}
-                  disabled={isLoading || pushState !== "subscribed"}
+                  disabled={isLoading || permission !== "granted"}
                   className="w-full h-10"
                 >
-                  {pushState === "subscribed"
-                    ? t("settings.test_notification")
-                    : "Activate push to send a test"}
+                  {pushReady
+                    ? "Send test push"
+                    : "Send test notification"}
                 </Button>
               </div>
             )}
 
+            {/* Diagnostics — exact reason for any failure */}
             {diag && (
               <details className="bg-surface rounded-xl p-5 space-y-2">
                 <summary className="text-xs font-medium text-text-secondary uppercase tracking-wider cursor-pointer">
                   Diagnostics
                 </summary>
-                <div className="text-[11px] text-text-tertiary space-y-1 break-words pt-2">
+                <div className="text-[11px] text-text-tertiary space-y-1 break-words pt-2 font-mono">
                   <div>UA: {diag.userAgent}</div>
                   <div>
-                    Secure context: {String(diag.isSecureContext)} · Permission: {String(diag.permission)}
+                    Secure context: {String(diag.isSecureContext)} · Top-level:{" "}
+                    {String(diag.isTopLevel)} · Iframe: {String(diag.isInIframe)}
                   </div>
                   <div>
-                    Notification API: {String(diag.hasNotification)} · ServiceWorker:{" "}
-                    {String(diag.hasServiceWorker)} · PushManager: {String(diag.hasPushManager)}
+                    Notification API: {String(diag.hasNotificationApi)} · ServiceWorker:{" "}
+                    {String(diag.hasServiceWorker)} · PushManager (global):{" "}
+                    {String(diag.hasPushManagerGlobal)}
                   </div>
                   <div>
                     VAPID key present: {String(diag.vapidKeyPresent)} · SW script:{" "}
@@ -878,6 +1118,16 @@ export default function NotificationSettingsPage() {
                     SW controller active: {String(diag.swControllerActive)} · Standalone:{" "}
                     {String(diag.isStandalone)}
                   </div>
+                  <div>
+                    Notification support: <b>{diag.notificationSupport}</b>
+                    {diag.notificationSupportReason ? ` — ${diag.notificationSupportReason}` : ""}
+                  </div>
+                  <div>
+                    Push support: <b>{diag.pushSupport}</b>
+                    {diag.pushSupportReason ? ` — ${diag.pushSupportReason}` : ""}
+                  </div>
+                  <div>Permission: {String(diag.permission)}</div>
+                  {diag.permissionError && <div>Permission error: {diag.permissionError}</div>}
                   {diag.subscribeError && <div>Subscribe error: {diag.subscribeError}</div>}
                   {diag.sendError && <div>Send error: {diag.sendError}</div>}
                   {diag.lastEndpoint && (
@@ -888,25 +1138,6 @@ export default function NotificationSettingsPage() {
                   )}
                 </div>
               </details>
-            )}
-
-            {isPWAInstalled === false && notificationState !== "granted" && (
-              <div className="bg-surface rounded-xl p-5 space-y-3">
-                <p className="text-xs font-medium text-text-secondary uppercase tracking-wider">
-                  For Best Reliability
-                </p>
-                <div className="flex items-start gap-2">
-                  <Smartphone
-                    className="h-4 w-4 text-text-tertiary mt-0.5 shrink-0"
-                    strokeWidth={1.5}
-                  />
-                  <p className="text-xs text-text-secondary">
-                    On mobile, notifications are most reliable when Ralts is installed as a PWA.
-                    After enabling above, tap the share button in your browser → &quot;Add to Home
-                    Screen&quot;.
-                  </p>
-                </div>
-              </div>
             )}
           </>
         )}
@@ -919,16 +1150,21 @@ function makeEmptyDiag(): Diagnostic {
   return {
     userAgent: "",
     isSecureContext: false,
-    hasNotification: false,
+    isTopLevel: true,
+    isInIframe: false,
+    hasNotificationApi: false,
     hasServiceWorker: false,
-    hasPushManager: false,
+    hasPushManagerGlobal: false,
     isStandalone: false,
     isIOS: false,
-    isIOSPWAEligible: false,
     vapidKeyPresent: false,
     swControllerActive: false,
     swScriptUrl: null,
     permission: "unavailable",
+    notificationSupport: "no-api",
+    pushSupport: "no-sw",
+    notificationSupportReason: null,
+    pushSupportReason: null,
     permissionError: null,
     subscribeError: null,
     sendError: null,
