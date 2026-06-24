@@ -167,8 +167,15 @@ export async function POST(request: Request) {
       insert("reflections", reflections),
     ]);
 
-    // 9. Create session for demo user and set cookies
+    // 9. Create session for demo user using the SAME @supabase/ssr cookie shape
+    // the rest of the app expects. Writing legacy cookie names here caused
+    // subsequent API calls (e.g. /api/push/subscribe) to be treated as
+    // unauthenticated by the middleware.
     const cookieStore = await cookies();
+    const projectRef =
+      new URL(process.env.NEXT_PUBLIC_SUPABASE_URL!).hostname.split(".")[0];
+    const authCookieName = `sb-${projectRef}-auth-token`;
+
     const { data: sessionData, error: signInError } = await serviceClient.auth.signInWithPassword({
       email: DEMO_EMAIL,
       password: DEMO_PASSWORD,
@@ -183,21 +190,28 @@ export async function POST(request: Request) {
 
     const { session } = sessionData;
 
-    // Set all Supabase auth cookies
-    cookieStore.set("sb-access-token", session.access_token, {
+    // @supabase/ssr stores the session as a single chunked cookie containing
+    // the base64url-encoded JSON `[access_token, refresh_token, ...]`.
+    // We mirror that exact format so createServerClient() can read it back.
+    const cookieValue = JSON.stringify([
+      session.access_token,
+      session.refresh_token,
+      null, // provider token (null for password sign-in)
+      null, // provider refresh token
+      session.expires_in ?? 3600,
+      session.expires_at,
+      "authenticated",
+      session.user?.id,
+    ]);
+
+    cookieStore.set(authCookieName, cookieValue, {
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",
       sameSite: "lax",
       maxAge: 60 * 60 * 24 * 7,
       path: "/",
     });
-    cookieStore.set("sb-refresh-token", session.refresh_token, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      sameSite: "lax",
-      maxAge: 60 * 60 * 24 * 30,
-      path: "/",
-    });
+
     cookieStore.set("demo-seeded", "true", {
       httpOnly: false,
       secure: process.env.NODE_ENV === "production",
