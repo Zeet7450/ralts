@@ -12,6 +12,7 @@ export interface Task {
   checklist: TaskChecklistItem[];
   due_date: string | null;
   reminder_times: string[];
+  reminder_sent_at: string | null;
   is_completed: boolean;
   completed_at: string | null;
   created_at: string;

@@ -1,0 +1,34 @@
+name: Reminders cron
+
+# Runs every 5 minutes and pings the production cron route with the
+# Bearer secret stored in GitHub Actions secrets. The endpoint itself
+# (src/app/api/cron/reminders/route.ts) is the source of truth for
+# scheduling decision logic — this workflow is just a timer.
+#
+# Granularity note: GitHub-hosted runners schedule workflows in bursts,
+# so a `* * * * *` cron can be silently throttled or delayed. Every
+# 5 minutes is the recommended minimum for reminder-class use cases
+# on the free plan and is what the cron route is built to handle.
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch: {}
+
+jobs:
+  tick:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Hit the cron endpoint
+        run: |
+          STATUS=$(curl -sS -o /tmp/cron.json -w "%{http_code}" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+            "${{ secrets.CRON_URL }}/api/cron/reminders")
+          echo "HTTP $STATUS"
+          cat /tmp/cron.json
+          echo
+          if [ "$STATUS" != "200" ]; then
+            echo "::error::cron endpoint returned $STATUS"
+            exit 1
+          fi

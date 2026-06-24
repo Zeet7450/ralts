@@ -45,20 +45,24 @@ export function DateTimePickerField({ label, value, onChange, placeholder = "Sel
 
   const WEEKDAYS = ["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"];
   const HOURS = Array.from({ length: 24 }, (_, i) => i);
+  // Every minute from 00 to 59 — no quarter-hour rounding.
+  const MINUTES = Array.from({ length: 60 }, (_, i) => String(i).padStart(2, "0"));
 
   const handleDateSelect = (date: Date) => {
-    // Keep existing time or default to 09:00
+    // Keep the time the user already picked (or the 09:00 default if no date
+    // was selected yet). The Date is in *local* time because that's what the
+    // calendar grid uses; we convert to UTC ISO so the value round-trips
+    // through Supabase's TIMESTAMPTZ column without timezone drift.
     const [h, m] = selectedTime.split(":").map(Number);
-    date.setHours(h, m);
-    const iso = date.toISOString().slice(0, 16);
-    onChange(iso);
+    date.setHours(h, m, 0, 0);
+    onChange(date.toISOString());
   };
 
   const handleTimeChange = (hour: number, minute: number) => {
     if (!selectedDate) return;
     const newDate = new Date(selectedDate);
-    newDate.setHours(hour, minute);
-    onChange(newDate.toISOString().slice(0, 16));
+    newDate.setHours(hour, minute, 0, 0);
+    onChange(newDate.toISOString());
   };
 
   const navigateMonth = (delta: number) => {
@@ -100,12 +104,12 @@ export function DateTimePickerField({ label, value, onChange, placeholder = "Sel
       </button>
 
       {isOpen && (
-        <div className="fixed inset-0 z-50 flex items-end justify-center">
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center sm:p-4">
           {/* Overlay */}
           <div className="absolute inset-0 bg-black/50" onClick={() => setIsOpen(false)} />
 
-          {/* Sheet */}
-          <div className="relative w-full max-w-sm bg-surface rounded-t-2xl p-5 pb-6 safe-area-pb animate-in slide-in-from-bottom duration-300">
+          {/* Sheet — bottom sheet on mobile, centered modal on desktop */}
+          <div className="relative w-full max-w-sm bg-surface rounded-t-2xl sm:rounded-2xl p-5 pb-6 safe-area-pb animate-in slide-in-from-bottom sm:slide-in-from-bottom-0 sm:fade-in sm:zoom-in-95 duration-300">
             {/* Header */}
             <div className="flex items-center justify-between mb-4">
               <button
@@ -202,7 +206,7 @@ export function DateTimePickerField({ label, value, onChange, placeholder = "Sel
                   onChange={(e) => handleTimeChange(parseInt(selectedTime.split(":")[0], 10), parseInt(e.target.value, 10))}
                   className="flex-1 h-10 rounded-lg border border-border bg-surface px-2 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-accent"
                 >
-                  {["00", "15", "30", "45"].map((m) => (
+                  {MINUTES.map((m) => (
                     <option key={m} value={m}>{m}</option>
                   ))}
                 </select>

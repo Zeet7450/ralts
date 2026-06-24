@@ -30,12 +30,19 @@ export default function TaskDetailPage() {
     fetchTasks();
   }, [fetchTasks]);
 
+  // Sync form state with the loaded task. This is the canonical
+  // "load async, mirror into editable form state" pattern — there is
+  // no way to drive a form from a zustand store without an effect.
   useEffect(() => {
     const task = tasks.find((t) => t.id === taskId);
     if (task) {
       setTitle(task.title);
       setDescription(task.description || "");
-      setDueDate(task.due_date ? task.due_date.slice(0, 16) : "");
+      // due_date is stored as a full ISO string with timezone (e.g.
+      // "2026-06-24T04:00:00.000Z" for 12:00 in UTC+8). Pass it through
+      // as-is; the picker parses it back to the user's local hour/minute.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setDueDate(task.due_date || "");
     }
   }, [tasks, taskId]);
 
