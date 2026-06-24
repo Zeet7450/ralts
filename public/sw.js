@@ -1,7 +1,7 @@
 // Ralts service worker — handles push notifications.
 // Served as /sw.js. Registered by the notifications settings page.
 
-const CACHE_NAME = "ralts-v1";
+const CACHE_NAME = "ralts-v2";
 const OFFLINE_URL = "/dashboard";
 
 // Install — pre-cache offline fallback
