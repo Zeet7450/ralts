@@ -138,24 +138,24 @@ function describePushSupport(s: PushSupport, isSubscribed: boolean): string {
 }
 
 /**
- * Probe the browser's notification capability in order of likelihood so the
- * UI can show the *exact* missing prerequisite instead of a generic message.
+ * Probe the browser's notification capability so the UI can show the *exact*
+ * missing prerequisite instead of a generic "browser not supported" message.
  *
- * Rules:
- *  - `'Notification' in window` is the prerequisite for the Notification API.
- *    Chrome, Firefox, Edge, Safari 16+, and Opera all expose it on https or
- *    localhost. If it is missing, the browser (or an in-app WebView) does
- *    NOT support notifications at all.
- *  - `window.isSecureContext` must be true. On Chrome and Firefox the
- *    Notification constructor is on window even on http, but every call is
- *    silently dropped and `requestPermission()` is a no-op that returns
- *    "denied". Treat that as "insecure" — not as "unsupported".
- *  - iOS Safari only exposes `Notification` once the page is launched as an
- *    installed PWA. In regular browser mode `Notification` is undefined —
- *    we treat that as "install the PWA" rather than "unsupported".
- *  - Iframes without an `allow="notifications"` permission policy will fail
- *    silently; the constructor exists but `requestPermission` rejects with
- *    NotAllowedError.
+ * Critical ordering rule: `window.isSecureContext` MUST be checked BEFORE
+ * `'Notification' in window`. On a real modern browser (Chrome, Firefox, Edge)
+ * over plain `http://` the Notification constructor is *intentionally* hidden
+ * by the browser — that does NOT mean the browser lacks support, it means
+ * the page is insecure. If we check `'Notification' in window` first we
+ * mislabel this as "no-api" and the user concludes their browser is broken.
+ *
+ * Rules, in priority order:
+ *  1. iOS Safari in regular browser mode: `Notification` is intentionally
+ *     undefined until the site is installed as a PWA. Treat as install-prompt.
+ *  2. Insecure context (http:// non-localhost): `Notification` and
+ *     `ServiceWorker` are deliberately not exposed. Treat as "HTTPS required".
+ *  3. Notification constructor missing despite being secure: real no-api case.
+ *  4. Iframe without `allow="notifications"` permission policy.
+ *  5. Available.
  */
 function detectNotificationSupport(): {
   support: NotificationSupport;
@@ -169,9 +169,10 @@ function detectNotificationSupport(): {
     window.matchMedia?.("(display-mode: standalone)").matches ||
     (window.navigator as Navigator & { standalone?: boolean })?.standalone === true;
 
-  // iOS Safari in regular browser tab: Notification is intentionally undefined
-  // until installed as a PWA. Don't say "unsupported" — tell the user how to
-  // fix it.
+  // 1. iOS Safari in regular browser tab — `Notification` is intentionally
+  //    undefined until installed as a PWA. Don't say "unsupported"; tell the
+  //    user how to fix it. We check this first because the iOS install-mode
+  //    hint is more actionable than the generic HTTPS hint.
   if (isIOS && !isStandalone && !("Notification" in window)) {
     return {
       support: "ios-needs-pwa",
@@ -180,6 +181,21 @@ function detectNotificationSupport(): {
     };
   }
 
+  // 2. Insecure context. On a real modern browser, the Notification
+  //    constructor is hidden on http:// origins that are not localhost.
+  //    `isSecureContext` is the canonical signal — check it BEFORE
+  //    `'Notification' in window` so we don't misreport this as no-api.
+  if (!window.isSecureContext) {
+    return {
+      support: "insecure",
+      reason:
+        `Notifications require a secure context (HTTPS or http://localhost). The current origin (${window.location.origin}) is not secure, so the Notification and ServiceWorker APIs are intentionally hidden by the browser. Open the HTTPS version of this URL.`,
+    };
+  }
+
+  // 3. Secure context but Notification is still missing — this is the actual
+  //    "browser doesn't support it" case (very old browser or locked-down
+  //    in-app WebView).
   if (!("Notification" in window)) {
     return {
       support: "no-api",
@@ -188,17 +204,10 @@ function detectNotificationSupport(): {
     };
   }
 
-  if (!window.isSecureContext) {
-    return {
-      support: "insecure",
-      reason:
-        "Notifications require a secure context (HTTPS or http://localhost). The current origin is not secure, so notifications will be silently blocked.",
-    };
-  }
-
+  // 4. Iframe without an `allow="notifications"` permission policy. The
+  //    constructor exists but `requestPermission()` rejects with
+  //    NotAllowedError.
   if (window.self !== window.top) {
-    // We're in an iframe. Notifications from inside iframes require an
-    // `allow="notifications"` permission policy on the embedding <iframe>.
     return {
       support: "iframe",
       reason:
@@ -206,6 +215,7 @@ function detectNotificationSupport(): {
     };
   }
 
+  // 5. All capability checks passed.
   return { support: "available", reason: null };
 }
 
@@ -215,8 +225,11 @@ function detectNotificationSupport(): {
  *  - serviceWorker in navigator
  *  - PushManager on the serviceWorker registration
  *  - A non-empty VAPID public key
- * If any of those are missing we still keep local notifications available —
- * we just can't subscribe to a server push.
+ *
+ * As with `detectNotificationSupport`, the secure-context check must run
+ * BEFORE the `'serviceWorker' in navigator` check. On http:// origins
+ * `serviceWorker` is intentionally undefined; that is not "browser doesn't
+ * support service workers", that is "page is insecure".
  */
 function detectPushSupport(opts: {
   hasServiceWorker: boolean;
@@ -228,7 +241,7 @@ function detectPushSupport(opts: {
   if (!window.isSecureContext) {
     return {
       support: "insecure",
-      reason: "Push requires HTTPS or localhost.",
+      reason: `Push requires HTTPS or localhost. The current origin (${window.location.origin}) is not secure, so the ServiceWorker and Push APIs are intentionally hidden.`,
     };
   }
   if (!opts.hasServiceWorker) {
@@ -874,7 +887,11 @@ export default function NotificationSettingsPage() {
         {(notificationSupport === "available" ||
           // On iOS we still want to render the test-instructions and diagnostics
           // even though the Notification API itself is hidden.
-          showIOSInstallPrompt) && (
+          showIOSInstallPrompt ||
+          // On an insecure origin we still render the Status card so the
+          // user can see exactly which capability is hidden and why.
+          showInsecureHint ||
+          showIframeHint) && (
           <>
             {/* Diagnostic status card */}
             <div className="bg-surface rounded-xl p-5 space-y-4">
