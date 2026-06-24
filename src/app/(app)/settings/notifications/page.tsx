@@ -5,14 +5,10 @@ import { useRouter } from "next/navigation";
 import { useEffect, useState, useCallback, useRef } from "react";
 import {
   ArrowLeft,
-  Bell,
   BellOff,
   AlertCircle,
   CheckCircle2,
-  WifiOff,
-  RefreshCw,
   Smartphone,
-  Monitor,
   ShieldAlert,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -277,38 +273,6 @@ function readLiveCapabilities(): {
   };
 }
 
-function describeNotificationSupport(s: NotificationSupport): string {
-  switch (s) {
-    case "available":
-      return "Available — `new Notification(...)` works in this browser";
-    case "insecure":
-      return "Blocked — current origin is not a secure context";
-    case "iframe":
-      return "Blocked — inside an iframe without `allow=\"notifications\"`";
-    case "ios-needs-pwa":
-      return "Hidden — install Ralts to Home Screen on iOS";
-    case "no-api":
-      return "Not exposed by this browser";
-  }
-}
-
-function describePushSupport(s: PushSupport, isSubscribed: boolean): string {
-  switch (s) {
-    case "available":
-      return isSubscribed
-        ? "Active — server can deliver pushes even when the app is closed"
-        : "Available — not yet subscribed";
-    case "no-vapid":
-      return "Disabled — NEXT_PUBLIC_VAPID_PUBLIC_KEY missing (local notifications still work)";
-    case "insecure":
-      return "Blocked — current origin is not a secure context";
-    case "no-sw":
-      return "Blocked — Service Worker API not exposed by this browser";
-    case "no-push-manager":
-      return "Not supported by this browser's service worker";
-  }
-}
-
 // ─── Component ─────────────────────────────────────────────────────────────
 
 export default function NotificationSettingsPage() {
@@ -322,7 +286,7 @@ export default function NotificationSettingsPage() {
   const [testSent, setTestSent] = useState(false);
   const [testError, setTestError] = useState<string | null>(null);
   const [testKind, setTestKind] = useState<"local" | "sw" | "push" | null>(null);
-  const [isPWAInstalled, setIsPWAInstalled] = useState<boolean | null>(null);
+  const [, setIsPWAInstalled] = useState<boolean | null>(null);
   const [diag, setDiag] = useState<Diagnostic | null>(null);
 
   // Refs that always read latest values inside async callbacks
@@ -744,9 +708,24 @@ export default function NotificationSettingsPage() {
             error?: string;
             code?: string;
           };
-          if (data.code === "EXPIRED") {
+          if (data.code === "EXPIRED" || response.status === 404) {
+            // Browser has a stale subscription but the server has no row for
+            // this user. Clear the subscribed state and refresh the diag so
+            // the UI truthfully reflects "no subscription".
             setPushState("no-subscription");
-            setTestError("Subscription expired. Please re-enable push first.");
+            setDiag((p) =>
+              p
+                ? {
+                    ...p,
+                    lastEndpoint: null,
+                    sendError:
+                      "Browser holds a stale push subscription but the server has no row for this user. Tap Activate Real Push to re-subscribe.",
+                  }
+                : p
+            );
+            setTestError(
+              "No active subscription for this account. Tap Activate Real Push to re-subscribe."
+            );
             return;
           }
           const detail = data.error || `HTTP ${response.status}`;
@@ -767,7 +746,7 @@ export default function NotificationSettingsPage() {
           setTestKind("sw");
           setTestSent(true);
           setTimeout(() => setTestSent(false), 3000);
-        } catch (err) {
+        } catch {
           // SW path failed — try plain `new Notification` as a last resort.
           try {
             new Notification(title, { body: bodyText, tag: localTag });
@@ -910,6 +889,35 @@ export default function NotificationSettingsPage() {
   const showIframeHint = diag?.notificationSupport === "iframe";
 
   // ─── Render ──────────────────────────────────────────────────────────────
+  //
+  // Target structure (per spec):
+  //   1. Compact status summary (one line)
+  //   2. ONE primary action (Enable Notifications / Activate Push)
+  //   3. ONE test button (auto-picks the best available path)
+  //   4. Optional explanatory copy
+  //   5. Collapsible Advanced / Diagnostics panel with all secondary
+  //      actions (local-only test, SW-only test, register SW, refresh,
+  //      full diagnostic dump).
+
+  const summaryLine = (() => {
+    if (permission === "denied") return "Notifications are blocked in your browser.";
+    if (!notificationsReady) return "Notifications are not enabled yet.";
+    if (pushReady) return "Real background push is active.";
+    if (diag?.pushSupport === "available")
+      return "Local notifications active — subscribe to enable background push.";
+    return "Local notifications active — server push is not configured.";
+  })();
+
+  const summaryState: "ok" | "pending" | "error" | "info" =
+    permission === "denied"
+      ? "error"
+      : pushReady
+        ? "ok"
+        : notificationsReady
+          ? diag?.pushSupport === "available"
+            ? "pending"
+            : "info"
+          : "pending";
 
   return (
     <div className="min-h-screen pb-24">
@@ -922,7 +930,8 @@ export default function NotificationSettingsPage() {
         </div>
       </div>
 
-      <div className="px-4 space-y-4">
+      <div className="px-4 space-y-3">
+        {/* ─── BLOCKING BANNERS (only when nothing else can render) ──── */}
         {showFullyUnsupported && (
           <div className="bg-surface rounded-xl p-6 text-center space-y-3">
             <div className="w-12 h-12 rounded-full bg-surface-elevated flex items-center justify-center mx-auto">
@@ -947,9 +956,9 @@ export default function NotificationSettingsPage() {
                 Install Ralts to use notifications
               </p>
               <p className="text-xs text-text-secondary mt-1">
-                On iPhone and iPad, the Notification API is only exposed when Ralts is launched from
-                the Home Screen. Tap the share button in Safari → &quot;Add to Home Screen&quot;, then
-                open Ralts from the Home Screen and return here.
+                On iPhone and iPad, notifications only work when Ralts is launched from the Home
+                Screen. Tap the share button in Safari → &quot;Add to Home Screen&quot;, then open
+                Ralts from the Home Screen and return here.
               </p>
             </div>
           </div>
@@ -988,7 +997,7 @@ export default function NotificationSettingsPage() {
           </div>
         )}
 
-        {permission === "denied" && (
+        {permission === "denied" && !showFullyUnsupported && !showIOSInstallPrompt && (
           <div className="bg-surface rounded-xl p-6 text-center space-y-3">
             <div className="w-12 h-12 rounded-full bg-destructive/10 flex items-center justify-center mx-auto">
               <BellOff className="h-6 w-6 text-destructive" strokeWidth={1.5} />
@@ -996,403 +1005,144 @@ export default function NotificationSettingsPage() {
             <div>
               <p className="text-sm font-medium text-text-primary">Notifications Blocked</p>
               <p className="text-xs text-text-secondary mt-1">
-                Ralts cannot send notifications because permission was denied. Open your browser
-                settings, allow notifications for this site, then come back and refresh.
+                Permission was denied. Open your browser settings, allow notifications for this
+                site, then refresh.
               </p>
             </div>
           </div>
         )}
 
+        {/* ─── COMPACT STATUS + PRIMARY ACTION + ONE TEST BUTTON ────── */}
         {(diag?.notificationSupport === "available" ||
           showIOSInstallPrompt ||
           showInsecureHint ||
           showIframeHint) && (
           <>
-            {/* ─── TRUTHFUL STATUS CARD ────────────────────────────────────
-             *
-             * Every row shows one specific capability with its exact
-             * current state. No more "everything is error" because the
-             * subscription row defaults to red when push isn't active. */}
-            <div className="bg-surface rounded-xl p-5 space-y-4">
-              <p className="text-xs font-medium text-text-secondary uppercase tracking-wider">
-                Status
-              </p>
-
-              <StatusRow
-                label="Permission"
-                value={
-                  permission === "granted"
-                    ? "Granted — site can show notifications"
-                    : permission === "default"
-                      ? "Not yet asked — click Enable below"
-                      : permission === "denied"
-                        ? "Denied at browser level"
-                        : "Unavailable (no Notification API)"
-                }
-                state={
-                  permission === "granted"
-                    ? "ok"
-                    : permission === "denied"
-                      ? "error"
-                      : "pending"
-                }
+            {/* One-line status summary */}
+            <div className="bg-surface rounded-xl px-4 py-3 flex items-center gap-3">
+              <div
+                className={`w-2 h-2 rounded-full shrink-0 ${
+                  summaryState === "ok"
+                    ? "bg-success"
+                    : summaryState === "error"
+                      ? "bg-destructive"
+                      : summaryState === "info"
+                        ? "bg-accent"
+                        : "bg-text-tertiary"
+                }`}
               />
-
-              <StatusRow
-                label="Local notification (Notification API)"
-                value={describeNotificationSupport(diag?.notificationSupport ?? "no-api")}
-                state={
-                  diag?.notificationSupport === "available"
-                    ? diag?.liveTestRan
-                      ? diag.liveTestError
-                        ? "error"
-                        : "ok"
-                      : "pending"
-                    : diag?.notificationSupport === "ios-needs-pwa"
-                      ? "info"
-                      : "error"
-                }
-              />
-
-              <StatusRow
-                label="Service worker"
-                value={
-                  diag?.swRegistrationActive
-                    ? "Registered, active, controlling the page"
-                    : diag?.swRegistrationExists
-                      ? "Registered (not yet controlling)"
-                      : diag?.swControllerActive
-                        ? "A service worker is controlling this page from a previous session"
-                        : "Not registered"
-                }
-                state={
-                  diag?.swRegistrationActive
-                    ? "ok"
-                    : diag?.swControllerActive
-                      ? "info"
-                      : "pending"
-                }
-                action={
-                  diag && !diag.swRegistrationActive
-                    ? { label: "Register", onClick: registerServiceWorker }
-                    : undefined
-                }
-              />
-
-              <StatusRow
-                label="Real background push (server → browser)"
-                value={describePushSupport(
-                  diag?.pushSupport ?? "no-sw",
-                  pushState === "subscribed"
-                )}
-                state={
-                  pushState === "subscribed"
-                    ? "ok"
-                    : diag?.pushSupport === "available"
-                      ? "pending"
-                      : diag?.pushSupport === "no-vapid"
-                        ? "info"
-                        : "error"
-                }
-                action={
-                  diag?.pushSupport === "available" &&
-                  (pushState === "error" || pushState === "no-subscription")
-                    ? { label: "Subscribe", onClick: handleResubscribe }
-                    : undefined
-                }
-              />
-
-              <StatusRow
-                label="App Mode"
-                value={
-                  isPWAInstalled === null
-                    ? "Checking..."
-                    : isPWAInstalled
-                      ? "Installed PWA — background push most reliable"
-                      : "Browser tab — install for best results"
-                }
-                state={isPWAInstalled ? "info" : "pending"}
-                icon={
-                  isPWAInstalled ? (
-                    <Smartphone className="h-4 w-4 text-accent" strokeWidth={1.5} />
-                  ) : (
-                    <Monitor className="h-4 w-4 text-text-tertiary" strokeWidth={1.5} />
-                  )
-                }
-              />
-
-              {lastError && (
-                <div className="flex items-start gap-2 bg-destructive/10 rounded-lg p-3">
-                  <AlertCircle className="h-4 w-4 text-destructive mt-0.5 shrink-0" strokeWidth={1.5} />
-                  <p className="text-xs text-destructive break-words">{lastError}</p>
-                </div>
-              )}
+              <p className="text-sm text-text-primary">{summaryLine}</p>
             </div>
 
-            {/* ─── PERMISSION ACTION CARD ────────────────────────────────── */}
-            <div className="bg-surface rounded-xl p-5 space-y-4">
-              <div className="flex items-start gap-3">
-                <div
-                  className={`w-10 h-10 rounded-full flex items-center justify-center shrink-0 ${
-                    notificationsReady ? "bg-accent/10" : "bg-surface-elevated"
-                  }`}
-                >
-                  <Bell
-                    className={`h-5 w-5 ${
-                      notificationsReady ? "text-accent" : "text-text-tertiary"
-                    }`}
-                    strokeWidth={1.5}
-                  />
-                </div>
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm font-medium text-text-primary">
-                    {t("settings.enable_notifications")}
-                  </p>
-                  <p className="text-xs text-text-secondary mt-0.5">
-                    {notificationsReady
-                      ? "Ralts has permission to show notifications."
-                      : "Enable notifications to receive updates from Ralts."}
-                  </p>
-                </div>
-              </div>
-
-              <div
-                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium ${
-                  pushReady
-                    ? "bg-success/10 text-success"
-                    : notificationsReady
-                      ? diag?.pushSupport === "available"
-                        ? "bg-warning/10 text-warning"
-                        : "bg-accent/10 text-accent"
-                      : "bg-surface-elevated text-text-secondary"
-                }`}
+            {/* ONE primary action */}
+            {permission === "default" && diag?.notificationSupport === "available" && (
+              <Button
+                onClick={handleEnable}
+                disabled={isLoading}
+                className="w-full h-11 bg-accent text-white hover:bg-accent/90"
               >
-                {pushReady ? (
-                  <>
-                    <CheckCircle2 className="h-3 w-3" strokeWidth={1.5} />
-                    Real background push active
-                  </>
-                ) : notificationsReady ? (
-                  diag?.pushSupport === "available" ? (
-                    <>
-                      <AlertCircle className="h-3 w-3" strokeWidth={1.5} />
-                      Local notifications only — Subscribe to enable real push
-                    </>
-                  ) : (
-                    <>
-                      <CheckCircle2 className="h-3 w-3" strokeWidth={1.5} />
-                      Local notifications only — real push not configured
-                    </>
-                  )
-                ) : (
-                  <>
-                    <BellOff className="h-3 w-3" strokeWidth={1.5} />
-                    Not enabled
-                  </>
-                )}
-              </div>
+                Enable Notifications
+              </Button>
+            )}
 
-              {permission === "default" && (
+            {permission === "granted" &&
+              diag?.pushSupport === "available" &&
+              pushState !== "subscribed" && (
                 <Button
-                  onClick={handleEnable}
-                  disabled={isLoading || diag?.notificationSupport !== "available"}
-                  className="w-full h-10 bg-accent text-white hover:bg-accent/90"
+                  onClick={handleResubscribe}
+                  disabled={isLoading}
+                  className="w-full h-11 bg-accent text-white hover:bg-accent/90"
                 >
-                  Enable Notifications
+                  {pushState === "subscribing" ? "Subscribing..." : "Activate Real Push"}
                 </Button>
               )}
 
-              {permission === "granted" &&
-                diag?.pushSupport === "available" &&
-                pushState !== "subscribed" && (
-                  <Button
-                    onClick={handleResubscribe}
-                    disabled={isLoading}
-                    className="w-full h-10 bg-accent text-white hover:bg-accent/90"
-                  >
-                    {pushState === "subscribing" ? "Subscribing..." : "Activate Real Push"}
-                  </Button>
-                )}
-
-              {permission === "granted" && (
-                <p className="text-xs text-text-tertiary text-center">
-                  To disable, revoke permission in your browser settings.
-                </p>
-              )}
-            </div>
-
-            {/* ─── TEST NOTIFICATION ───────────────────────────────────────
-             *
-             * Three buttons, each labelled with exactly what it does:
-             *   1. Send local test (page JS only — works while app is open)
-             *   2. Send SW test (service-worker showNotification — also page-open)
-             *   3. Send real push (server → push event → SW — works while closed) */}
+            {/* ONE test button — auto-picks push if subscribed, else local/SW */}
             {permission === "granted" && (
-              <div className="bg-surface rounded-xl p-5 space-y-4">
-                <p className="text-xs font-medium text-text-secondary uppercase tracking-wider">
-                  Test Notification
-                </p>
-
-                <div className="flex items-center gap-3">
-                  <div className="w-10 h-10 rounded-full bg-accent/10 flex items-center justify-center">
-                    <Bell className="h-5 w-5 text-accent" strokeWidth={1.5} />
-                  </div>
-                  <div className="flex-1">
-                    <p className="text-sm font-medium text-text-primary">
-                      {t("settings.test_notification")}
-                    </p>
-                    <p className="text-xs text-text-secondary">
-                      {pushReady
-                        ? "Real push is subscribed — the server will deliver a push to this device (works while the app is closed, where supported)."
-                        : diag?.pushSupport === "available"
-                          ? "Real push is available but not subscribed. Use the buttons below to verify what works in this browser right now."
-                          : "Real push is not configured — only local + service-worker notifications are available."}
-                    </p>
-                  </div>
-                </div>
+              <>
+                <Button
+                  variant="outline"
+                  onClick={() => handleSendTest("auto")}
+                  disabled={isLoading}
+                  className="w-full h-11"
+                >
+                  {pushReady ? "Send test push" : "Send test notification"}
+                </Button>
 
                 {testSent && (
-                  <div className="flex items-center gap-1.5 text-xs text-success">
+                  <div className="flex items-center gap-1.5 text-xs text-success px-1">
                     <CheckCircle2 className="h-3 w-3" strokeWidth={1.5} />
                     {testKind === "push" && "Sent a real push. It will arrive even when the app is closed."}
-                    {testKind === "sw" && "Fired a notification from the service worker. Works while the page is closed (no real push needed)."}
-                    {testKind === "local" && "Fired a local notification from page JS. Only works while this tab is open."}
+                    {testKind === "sw" && "Fired from the service worker. Works while the app is closed."}
+                    {testKind === "local" && "Fired from this tab. Only visible while the tab is open."}
                   </div>
                 )}
                 {testError && (
-                  <div className="flex items-start gap-1.5 text-xs text-destructive">
+                  <div className="flex items-start gap-1.5 text-xs text-destructive px-1">
                     <AlertCircle className="h-3 w-3 mt-0.5 shrink-0" strokeWidth={1.5} />
                     <span>{testError}</span>
                   </div>
                 )}
 
-                <div className="grid gap-2">
-                  <Button
-                    variant="outline"
-                    onClick={() => handleSendTest("local")}
-                    disabled={isLoading || permission !== "granted"}
-                    className="w-full h-10 justify-start text-left"
-                  >
-                    <span className="flex flex-col items-start gap-0.5">
-                      <span className="text-xs font-medium">Send local test (Notification API)</span>
-                      <span className="text-[10px] text-text-tertiary font-normal">
-                        Page-JS only · only works while this tab is open
-                      </span>
-                    </span>
-                  </Button>
-                  <Button
-                    variant="outline"
-                    onClick={() => handleSendTest("sw")}
-                    disabled={isLoading || permission !== "granted"}
-                    className="w-full h-10 justify-start text-left"
-                  >
-                    <span className="flex flex-col items-start gap-0.5">
-                      <span className="text-xs font-medium">Send service-worker test</span>
-                      <span className="text-[10px] text-text-tertiary font-normal">
-                        Uses the SW to show the notification · works while the app is closed
-                      </span>
-                    </span>
-                  </Button>
-                  <Button
-                    onClick={() => handleSendTest("push")}
-                    disabled={isLoading || !pushReady}
-                    className="w-full h-10 bg-accent text-white hover:bg-accent/90 justify-start text-left"
-                  >
-                    <span className="flex flex-col items-start gap-0.5">
-                      <span className="text-xs font-medium">
-                        Send real background push {pushReady ? "" : "(subscribe first)"}
-                      </span>
-                      <span className="text-[10px] text-white/80 font-normal">
-                        Server → push endpoint → SW · works while the app is closed
-                      </span>
-                    </span>
-                  </Button>
-                </div>
-              </div>
+                {lastError && (
+                  <div className="flex items-start gap-2 bg-destructive/10 rounded-lg p-3">
+                    <AlertCircle
+                      className="h-4 w-4 text-destructive mt-0.5 shrink-0"
+                      strokeWidth={1.5}
+                    />
+                    <p className="text-xs text-destructive break-words">{lastError}</p>
+                  </div>
+                )}
+
+                <p className="text-[11px] text-text-tertiary text-center pt-1">
+                  {pushReady
+                    ? "Push notifications will arrive even when the app is closed."
+                    : notificationsReady
+                      ? diag?.pushSupport === "available"
+                        ? "Subscribe to Activate Real Push to receive pushes while the app is closed."
+                        : "Real background push is not configured. Local + service-worker notifications will still arrive."
+                      : "Enable notifications above to receive updates from Ralts."}
+                </p>
+              </>
             )}
 
-            {/* ─── DIAGNOSTICS ─────────────────────────────────────────────
-             *
-             * Every line is a live read of `window`, `navigator`, or the
-             * service-worker registration. Nothing is derived or memoised
-             * across renders. Refresh = re-runs every probe. */}
-            {diag && (
-              <details className="bg-surface rounded-xl p-5 space-y-2" open>
-                <summary className="text-xs font-medium text-text-secondary uppercase tracking-wider cursor-pointer">
-                  Diagnostics (live, captured {diag.capturedAt})
-                </summary>
-                <div className="text-[11px] text-text-tertiary space-y-1 break-words pt-2 font-mono">
-                  <div>
-                    <b>Origin:</b> {diag.origin} ({diag.protocol}//{diag.hostname})
-                  </div>
-                  <div>
-                    <b>URL:</b> {diag.href}
-                  </div>
-                  <div>
-                    <b>UA:</b> {diag.userAgent}
-                  </div>
-                  <div>
-                    <b>Secure context:</b> {String(diag.isSecureContext)} · Top-level:{" "}
-                    {String(diag.isTopLevel)} · Iframe: {String(diag.isInIframe)}
-                  </div>
-                  <div>
-                    <b>typeof window.Notification:</b> {diag.typeofNotification}
-                  </div>
-                  <div>
-                    <b>typeof navigator.serviceWorker:</b> {diag.typeofServiceWorker}
-                  </div>
-                  <div>
-                    <b>typeof navigator.PushManager:</b> {diag.typeofNavigatorPushManager} (this is
-                    expected to be "undefined" — PushManager lives on
-                    ServiceWorkerRegistration.pushManager, not on navigator)
-                  </div>
-                  <div>
-                    <b>SW controller active:</b> {String(diag.swControllerActive)}
-                    {diag.swControllerScriptUrl ? ` (${diag.swControllerScriptUrl})` : ""}
-                  </div>
-                  <div>
-                    <b>SW registration exists:</b> {String(diag.swRegistrationExists)} · pushManager:{" "}
-                    {String(diag.swRegistrationPushManager)} · active:{" "}
-                    {String(diag.swRegistrationActive)}
-                  </div>
-                  <div>
-                    <b>Notification.permission:</b> {diag.notificationPermissionValue}
-                  </div>
-                  <div>
-                    <b>VAPID key:</b>{" "}
-                    {diag.vapidKeyPresent
-                      ? `present (${diag.vapidKeyLength} chars)`
-                      : "MISSING — push is disabled"}
-                  </div>
-                  <div>
-                    <b>Standalone:</b> {String(diag.isStandalone)} · iOS: {String(diag.isIOS)}
-                  </div>
-                  <div>
-                    <b>Notification support:</b> {diag.notificationSupport}
-                    {diag.notificationSupportReason ? ` — ${diag.notificationSupportReason}` : ""}
-                  </div>
-                  <div>
-                    <b>Push support:</b> {diag.pushSupport}
-                    {diag.pushSupportReason ? ` — ${diag.pushSupportReason}` : ""}
-                  </div>
-                  <div>
-                    <b>Last endpoint:</b>{" "}
-                    {diag.lastEndpoint
-                      ? `${diag.lastEndpoint.slice(0, 80)}${diag.lastEndpoint.length > 80 ? "…" : ""}`
-                      : "—"}
-                  </div>
-                  <div>
-                    <b>Live test:</b>{" "}
-                    {diag.liveTestRan
-                      ? diag.liveTestError
-                        ? `failed via ${diag.liveTestPath} — ${diag.liveTestError}`
-                        : `succeeded via ${diag.liveTestPath}`
-                      : "not run"}
-                  </div>
-                  {diag.subscribeError && <div><b>Subscribe error:</b> {diag.subscribeError}</div>}
-                  {diag.sendError && <div><b>Send error:</b> {diag.sendError}</div>}
-                </div>
-                <div className="flex gap-2 pt-3">
+            {permission === "granted" && (
+              <p className="text-[11px] text-text-tertiary text-center">
+                To disable, revoke permission in your browser settings.
+              </p>
+            )}
+
+            {/* ─── ADVANCED / DIAGNOSTICS (collapsed by default) ──────────── */}
+            <details className="bg-surface rounded-xl px-4 py-3">
+              <summary className="text-xs font-medium text-text-secondary uppercase tracking-wider cursor-pointer select-none">
+                Advanced · diagnostics
+              </summary>
+              <div className="pt-3 space-y-3">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => handleSendTest("local")}
+                    disabled={isLoading || permission !== "granted"}
+                  >
+                    Test · local (page JS)
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => handleSendTest("sw")}
+                    disabled={isLoading || permission !== "granted"}
+                  >
+                    Test · service worker
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => handleSendTest("push")}
+                    disabled={!pushReady || isLoading}
+                  >
+                    Test · real push
+                  </Button>
                   <Button
                     variant="outline"
                     size="sm"
@@ -1401,65 +1151,97 @@ export default function NotificationSettingsPage() {
                   >
                     Run live test
                   </Button>
+                </div>
+
+                {diag && (
+                  <div className="text-[11px] text-text-tertiary space-y-1 break-words font-mono border-t border-border pt-3">
+                    <div>
+                      <b>Origin:</b> {diag.origin} ({diag.protocol}{"//"}{diag.hostname})
+                    </div>
+                    <div>
+                      <b>Secure context:</b> {String(diag.isSecureContext)} · Top-level:{" "}
+                      {String(diag.isTopLevel)} · Iframe: {String(diag.isInIframe)}
+                    </div>
+                    <div>
+                      <b>typeof window.Notification:</b> {diag.typeofNotification}
+                    </div>
+                    <div>
+                      <b>typeof navigator.serviceWorker:</b> {diag.typeofServiceWorker}
+                    </div>
+                    <div>
+                      <b>Notification support:</b> {diag.notificationSupport}
+                      {diag.notificationSupportReason ? ` — ${diag.notificationSupportReason}` : ""}
+                    </div>
+                    <div>
+                      <b>Push support:</b> {diag.pushSupport}
+                      {diag.pushSupportReason ? ` — ${diag.pushSupportReason}` : ""}
+                    </div>
+                    <div>
+                      <b>SW controller active:</b> {String(diag.swControllerActive)}
+                      {diag.swControllerScriptUrl ? ` (${diag.swControllerScriptUrl})` : ""}
+                    </div>
+                    <div>
+                      <b>SW registration:</b> {String(diag.swRegistrationExists)} · pushManager:{" "}
+                      {String(diag.swRegistrationPushManager)} · active:{" "}
+                      {String(diag.swRegistrationActive)}
+                    </div>
+                    <div>
+                      <b>Notification.permission:</b> {diag.notificationPermissionValue}
+                    </div>
+                    <div>
+                      <b>VAPID key:</b>{" "}
+                      {diag.vapidKeyPresent
+                        ? `present (${diag.vapidKeyLength} chars)`
+                        : "MISSING — push is disabled"}
+                    </div>
+                    <div>
+                      <b>Standalone:</b> {String(diag.isStandalone)} · iOS: {String(diag.isIOS)}
+                    </div>
+                    <div>
+                      <b>Live test:</b>{" "}
+                      {diag.liveTestRan
+                        ? diag.liveTestError
+                          ? `failed via ${diag.liveTestPath} — ${diag.liveTestError}`
+                          : `succeeded via ${diag.liveTestPath}`
+                        : "not run"}
+                    </div>
+                    {diag.lastEndpoint && (
+                      <div>
+                        <b>Endpoint:</b>{" "}
+                        {diag.lastEndpoint.slice(0, 80)}
+                        {diag.lastEndpoint.length > 80 ? "…" : ""}
+                      </div>
+                    )}
+                    {diag.subscribeError && (
+                      <div>
+                        <b>Subscribe error:</b> {diag.subscribeError}
+                      </div>
+                    )}
+                    {diag.sendError && <div><b>Send error:</b> {diag.sendError}</div>}
+                    <div>
+                      <b>Captured:</b> {diag.capturedAt}
+                    </div>
+                  </div>
+                )}
+
+                <div className="flex gap-2">
                   <Button variant="outline" size="sm" onClick={refreshDiagnostic}>
-                    Refresh diagnostics
+                    Refresh
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={registerServiceWorker}
+                    disabled={isLoading || !diag || diag.swRegistrationActive}
+                  >
+                    Re-register service worker
                   </Button>
                 </div>
-              </details>
-            )}
+              </div>
+            </details>
           </>
         )}
       </div>
-    </div>
-  );
-}
-
-function StatusRow({
-  label,
-  value,
-  state,
-  action,
-  icon,
-}: {
-  label: string;
-  value: string;
-  state: "ok" | "pending" | "error" | "info";
-  action?: { label: string; onClick: () => void };
-  icon?: React.ReactNode;
-}) {
-  const bg =
-    state === "ok"
-      ? "bg-success/10"
-      : state === "error"
-        ? "bg-destructive/10"
-        : state === "info"
-          ? "bg-accent/10"
-          : "bg-surface-elevated";
-  const defaultIcon =
-    state === "ok" ? (
-      <CheckCircle2 className="h-4 w-4 text-success" strokeWidth={1.5} />
-    ) : state === "error" ? (
-      <AlertCircle className="h-4 w-4 text-destructive" strokeWidth={1.5} />
-    ) : state === "pending" ? (
-      <RefreshCw className="h-4 w-4 text-text-tertiary animate-spin" strokeWidth={1.5} />
-    ) : (
-      <WifiOff className="h-4 w-4 text-text-tertiary" strokeWidth={1.5} />
-    );
-
-  return (
-    <div className="flex items-center gap-3">
-      <div className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 ${bg}`}>
-        {icon ?? defaultIcon}
-      </div>
-      <div className="flex-1 min-w-0">
-        <p className="text-xs font-medium text-text-primary">{label}</p>
-        <p className="text-xs text-text-secondary">{value}</p>
-      </div>
-      {action && (
-        <button onClick={action.onClick} className="text-xs text-accent hover:underline shrink-0">
-          {action.label}
-        </button>
-      )}
     </div>
   );
 }
