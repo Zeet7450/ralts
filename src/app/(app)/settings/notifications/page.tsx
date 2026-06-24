@@ -14,26 +14,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
-// ─── Capability states ──────────────────────────────────────────────────────
-//
-// The capability ladder drives both the user-facing copy (a one-line summary)
-// and the optional "why this is blocked" banner. The diagnostic panel at the
-// bottom of the page reads the same fields, so the surface UI and the
-// developer diagnostics cannot drift apart.
-
-type NotificationSupport =
-  | "available" // new Notification() works
-  | "no-api" // Notification constructor is not on window
-  | "insecure" // window.isSecureContext === false
-  | "iframe" // running inside a frame without permission policy
-  | "ios-needs-pwa"; // iOS Safari in regular browser tab
-
-type PushSupport =
-  | "available" // pushManager.subscribe() can succeed (SW + PushManager + HTTPS + VAPID)
-  | "no-vapid" // SW + HTTPS, but NEXT_PUBLIC_VAPID_PUBLIC_KEY missing
-  | "no-sw" // serviceWorker not exposed
-  | "no-push-manager" // browser doesn't expose PushManager on its SW
-  | "insecure"; // origin is not a secure context
+// ─── State types ────────────────────────────────────────────────────────────
 
 type PermissionStatus = "default" | "granted" | "denied" | "unavailable";
 type SwState = "not-registered" | "registering" | "registered" | "error";
@@ -44,40 +25,17 @@ type PushState =
   | "error"
   | "not-configured";
 
+// Why the browser can't show notifications. null = available.
+type NotificationBlock = "ios-needs-pwa" | "insecure" | "iframe" | "no-api" | null;
+
+// Why background push can't work. null = configured (SW + HTTPS + VAPID + pushManager).
+type PushBlock = "insecure" | "no-sw" | "no-vapid" | "no-push-manager" | null;
+
+// ─── Constants ──────────────────────────────────────────────────────────────
+
 const VAPID_PUBLIC_KEY = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY || "";
 const SW_URL = "/sw.js";
 const SW_SCOPE = "/";
-
-// ─── Diagnostic snapshot (collapsed Advanced panel) ─────────────────────────
-
-type Diagnostic = {
-  capturedAt: string;
-  userAgent: string;
-  origin: string;
-  hostname: string;
-  protocol: string;
-  isSecureContext: boolean;
-  isTopLevel: boolean;
-  isInIframe: boolean;
-  typeofNotification: "function" | "undefined" | string;
-  typeofServiceWorker: "object" | "undefined" | string;
-  notificationPermissionValue: PermissionStatus;
-  swControllerActive: boolean;
-  swRegistrationExists: boolean;
-  swRegistrationPushManager: boolean;
-  swRegistrationActive: boolean;
-  isStandalone: boolean;
-  isIOS: boolean;
-  vapidKeyPresent: boolean;
-  vapidKeyLength: number;
-  notificationSupport: NotificationSupport;
-  notificationSupportReason: string | null;
-  pushSupport: PushSupport;
-  pushSupportReason: string | null;
-  lastEndpoint: string | null;
-  subscribeError: string | null;
-  sendError: string | null;
-};
 
 // ─── Pure helpers (no React state) ─────────────────────────────────────────
 
@@ -117,92 +75,55 @@ function isIOSDevice(): boolean {
   return /iPad|iPhone|iPod/.test(navigator.userAgent) && !("MSStream" in window);
 }
 
-function readLiveCapabilities(): {
-  notificationSupport: NotificationSupport;
-  notificationSupportReason: string | null;
-  pushSupport: PushSupport;
-  pushSupportReason: string | null;
+/**
+ * Synchronous environment probe — runs in render setup, before any async
+ * service-worker check. The result drives the user-visible blocking banners.
+ */
+function readEnvironment(): {
+  notificationBlock: NotificationBlock;
+  pushBlock: PushBlock;
   permission: PermissionStatus;
-  swControllerActive: boolean;
-  typeofNotification: string;
-  typeofServiceWorker: string;
-  notificationPermissionValue: PermissionStatus;
   isSecureContext: boolean;
-  isTopLevel: boolean;
-  isInIframe: boolean;
 } {
   const isIOS = isIOSDevice();
   const isStandalone =
     typeof window !== "undefined" &&
     (window.matchMedia?.("(display-mode: standalone)").matches ||
       (window.navigator as Navigator & { standalone?: boolean })?.standalone === true);
-
   const hasNotificationConstructor =
     typeof window !== "undefined" && typeof window.Notification === "function";
   const hasServiceWorkerObject =
     typeof navigator !== "undefined" && typeof navigator.serviceWorker === "object";
   const isSecureContext =
     typeof window !== "undefined" ? window.isSecureContext : false;
-  const isTopLevel =
-    typeof window !== "undefined" ? window.self === window.top : true;
-  const isInIframe = !isTopLevel;
+  const isInIframe =
+    typeof window !== "undefined" && window.self !== window.top;
 
-  const notificationPermissionValue: PermissionStatus = hasNotificationConstructor
+  let notificationBlock: NotificationBlock = null;
+  if (isIOS && !isStandalone && !hasNotificationConstructor) {
+    notificationBlock = "ios-needs-pwa";
+  } else if (!isSecureContext) {
+    notificationBlock = "insecure";
+  } else if (!hasNotificationConstructor) {
+    notificationBlock = "no-api";
+  } else if (isInIframe) {
+    notificationBlock = "iframe";
+  }
+
+  let pushBlock: PushBlock = null;
+  if (!isSecureContext) {
+    pushBlock = "insecure";
+  } else if (!hasServiceWorkerObject) {
+    pushBlock = "no-sw";
+  } else if (!VAPID_PUBLIC_KEY) {
+    pushBlock = "no-vapid";
+  }
+
+  const permission: PermissionStatus = hasNotificationConstructor
     ? (Notification.permission as PermissionStatus)
     : "unavailable";
 
-  let notificationSupport: NotificationSupport = "available";
-  let notificationSupportReason: string | null = null;
-  if (isIOS && !isStandalone && !hasNotificationConstructor) {
-    notificationSupport = "ios-needs-pwa";
-    notificationSupportReason =
-      "iOS Safari only exposes the Notification API when Ralts is launched from the Home Screen.";
-  } else if (!isSecureContext) {
-    notificationSupport = "insecure";
-    notificationSupportReason = `Notifications require a secure context (HTTPS or http://localhost). The current origin (${window.location.origin}) is not secure, so the Notification and ServiceWorker APIs are intentionally hidden by the browser.`;
-  } else if (!hasNotificationConstructor) {
-    notificationSupport = "no-api";
-    notificationSupportReason =
-      "This browser does not expose the Notification constructor. Use a modern Chrome, Firefox, Edge, or Safari.";
-  } else if (isInIframe) {
-    notificationSupport = "iframe";
-    notificationSupportReason =
-      'Notifications cannot be requested from inside an iframe unless the parent grants `allow="notifications"`.';
-  }
-
-  const swControllerActive =
-    typeof navigator !== "undefined" && Boolean(navigator.serviceWorker?.controller);
-
-  let pushSupport: PushSupport = "available";
-  let pushSupportReason: string | null = null;
-  if (!isSecureContext) {
-    pushSupport = "insecure";
-    pushSupportReason = `Push requires HTTPS or localhost. The current origin (${window.location.origin}) is not secure.`;
-  } else if (!hasServiceWorkerObject) {
-    pushSupport = "no-sw";
-    pushSupportReason = "Service Worker API is not exposed by this browser.";
-  } else if (!VAPID_PUBLIC_KEY) {
-    pushSupport = "no-vapid";
-    pushSupportReason =
-      "NEXT_PUBLIC_VAPID_PUBLIC_KEY is not configured — server-push is disabled, but local notifications still work.";
-  }
-
-  return {
-    notificationSupport,
-    notificationSupportReason,
-    pushSupport,
-    pushSupportReason,
-    permission: notificationPermissionValue,
-    swControllerActive,
-    typeofNotification:
-      typeof window !== "undefined" ? typeof window.Notification : "undefined",
-    typeofServiceWorker:
-      typeof navigator !== "undefined" ? typeof navigator.serviceWorker : "undefined",
-    notificationPermissionValue,
-    isSecureContext,
-    isTopLevel,
-    isInIframe,
-  };
+  return { notificationBlock, pushBlock, permission, isSecureContext };
 }
 
 // ─── Component ─────────────────────────────────────────────────────────────
@@ -215,107 +136,70 @@ export default function NotificationSettingsPage() {
   const [swState, setSwState] = useState<SwState>("not-registered");
   const [pushState, setPushState] = useState<PushState>("no-subscription");
   const [lastError, setLastError] = useState<string | null>(null);
-  const [diag, setDiag] = useState<Diagnostic | null>(null);
+  const [notificationBlock, setNotificationBlock] = useState<NotificationBlock>(null);
+  const [pushBlock, setPushBlock] = useState<PushBlock>(null);
+  const [pushConfigured, setPushConfigured] = useState(false);
 
-  // ─── Diagnostic: built once on mount. The collapsed Advanced panel at the
-  // bottom of the page reads the same snapshot, so the user-facing summary
-  // and the diagnostic never drift.
-
-  const buildDiagnostic = useCallback(async (): Promise<Diagnostic> => {
-    const live = readLiveCapabilities();
-
-    let swRegistrationExists = false;
-    let swRegistrationPushManager = false;
-    let swRegistrationActive = false;
-    if (live.isSecureContext && live.swControllerActive) {
-      try {
-        const reg = await navigator.serviceWorker.getRegistration(SW_SCOPE);
-        if (reg) {
-          swRegistrationExists = true;
-          swRegistrationPushManager = "pushManager" in reg;
-          swRegistrationActive = Boolean(reg.active);
-        }
-      } catch {
-        // ignore
-      }
-    }
-
-    let pushSupport: PushSupport = live.pushSupport;
-    let pushSupportReason: string | null = live.pushSupportReason;
-    if (pushSupport === "available" && !swRegistrationPushManager) {
-      pushSupport = "no-push-manager";
-      pushSupportReason =
-        "The active service-worker registration does not expose `pushManager`. This browser does not support the Push API.";
-    }
-
-    return {
-      capturedAt: new Date().toISOString(),
-      userAgent: navigator.userAgent,
-      origin: window.location.origin,
-      hostname: window.location.hostname,
-      protocol: window.location.protocol,
-      isSecureContext: live.isSecureContext,
-      isTopLevel: live.isTopLevel,
-      isInIframe: live.isInIframe,
-      typeofNotification: live.typeofNotification,
-      typeofServiceWorker: live.typeofServiceWorker,
-      notificationPermissionValue: live.notificationPermissionValue,
-      swControllerActive: live.swControllerActive,
-      swRegistrationExists,
-      swRegistrationPushManager,
-      swRegistrationActive,
-      isStandalone:
-        window.matchMedia?.("(display-mode: standalone)").matches ||
-        (window.navigator as Navigator & { standalone?: boolean })?.standalone === true,
-      isIOS: isIOSDevice(),
-      vapidKeyPresent: Boolean(VAPID_PUBLIC_KEY),
-      vapidKeyLength: VAPID_PUBLIC_KEY.length,
-      notificationSupport: live.notificationSupport,
-      notificationSupportReason: live.notificationSupportReason,
-      pushSupport,
-      pushSupportReason,
-      lastEndpoint: null,
-      subscribeError: null,
-      sendError: null,
-    };
-  }, []);
+  // ─── Mount: sync environment probe + async pushManager probe + restore
+  // any existing push subscription. The result populates the capability
+  // state that drives the user-facing summary.
 
   useEffect(() => {
     if (typeof window === "undefined") return;
     let cancelled = false;
-    (async () => {
-      const d = await buildDiagnostic();
-      if (cancelled) return;
-      setDiag(d);
-      setPermission(d.notificationPermissionValue);
-      setSwState(d.swControllerActive ? "registered" : "not-registered");
 
-      if (d.pushSupport === "available" && d.swRegistrationPushManager) {
+    (async () => {
+      const env = readEnvironment();
+      if (cancelled) return;
+      setNotificationBlock(env.notificationBlock);
+      setPermission(env.permission);
+
+      // Async refinement: does the active SW registration expose pushManager?
+      let resolvedPushBlock: PushBlock = env.pushBlock;
+      let resolvedPushConfigured = env.pushBlock === null;
+      if (env.isSecureContext && env.pushBlock === null) {
+        try {
+          const reg = await navigator.serviceWorker.getRegistration(SW_SCOPE);
+          if (reg && !("pushManager" in reg)) {
+            resolvedPushBlock = "no-push-manager";
+            resolvedPushConfigured = false;
+          }
+        } catch {
+          // ignore
+        }
+      }
+
+      if (cancelled) return;
+      setPushBlock(resolvedPushBlock);
+      setPushConfigured(resolvedPushConfigured);
+      setSwState(navigator.serviceWorker?.controller ? "registered" : "not-registered");
+
+      // Restore existing push subscription
+      if (
+        env.notificationBlock === null &&
+        env.permission === "granted" &&
+        resolvedPushConfigured
+      ) {
         try {
           const reg = await navigator.serviceWorker.getRegistration(SW_SCOPE);
           const sub = reg ? await reg.pushManager.getSubscription() : null;
-          if (!cancelled) {
-            setPushState(sub ? "subscribed" : "no-subscription");
-            if (sub) setDiag((p) => (p ? { ...p, lastEndpoint: sub.endpoint } : p));
-          }
+          if (!cancelled) setPushState(sub ? "subscribed" : "no-subscription");
         } catch {
           if (!cancelled) setPushState("no-subscription");
         }
-      } else if (d.pushSupport === "no-vapid") {
-        setPushState("not-configured");
       }
     })();
+
     return () => {
       cancelled = true;
     };
-  }, [buildDiagnostic]);
+  }, []);
 
   // ─── Production logic: register SW, subscribe, unsubscribe ───────────────
   //
-  // These are the same code paths the rest of the app exercises when it sends
-  // a push (the push handler in /api/push/send relies on the subscription this
-  // page creates). They are NOT test/dev code — they are the actual
-  // subscription lifecycle.
+  // Same code paths the rest of the app exercises when it sends a push
+  // (the push handler in /api/push/send relies on the subscription this
+  // page creates). Not test/dev code — the actual subscription lifecycle.
 
   const registerServiceWorker = useCallback(async (): Promise<ServiceWorkerRegistration | null> => {
     if (typeof window === "undefined") return null;
@@ -366,14 +250,12 @@ export default function NotificationSettingsPage() {
       const msg =
         "VAPID public key is not configured. Add NEXT_PUBLIC_VAPID_PUBLIC_KEY to your Vercel environment and redeploy. Local notifications still work — only server push is disabled.";
       setLastError(msg);
-      setDiag((p) => (p ? { ...p, vapidKeyPresent: false, subscribeError: msg } : p));
       setPushState("error");
       return false;
     }
     if (!window.isSecureContext) {
       const msg = "Push requires HTTPS or localhost. The current origin is not secure.";
       setLastError(msg);
-      setDiag((p) => (p ? { ...p, subscribeError: msg } : p));
       setPushState("error");
       return false;
     }
@@ -387,7 +269,6 @@ export default function NotificationSettingsPage() {
     if (!("pushManager" in reg)) {
       const msg = "Push API is not supported by this browser's service worker.";
       setLastError(msg);
-      setDiag((p) => (p ? { ...p, subscribeError: msg } : p));
       setPushState("error");
       return false;
     }
@@ -409,8 +290,7 @@ export default function NotificationSettingsPage() {
       if (applicationServerKey.byteLength === 0) {
         const msg = "VAPID public key decoded to zero bytes — check NEXT_PUBLIC_VAPID_PUBLIC_KEY.";
         setLastError(msg);
-        setDiag((p) => (p ? { ...p, subscribeError: msg } : p));
-        setPushState("error");
+      setPushState("error");
         return false;
       }
 
@@ -430,13 +310,12 @@ export default function NotificationSettingsPage() {
         const msg =
           "Server redirected the request — your session is no longer valid. Refresh the page, sign in again, then retry.";
         setLastError(msg);
-        setDiag((p) => (p ? { ...p, subscribeError: msg } : p));
-        setPushState("error");
         try {
           await subscription.unsubscribe();
         } catch {
           // ignore
         }
+        setPushState("error");
         return false;
       }
 
@@ -449,9 +328,6 @@ export default function NotificationSettingsPage() {
         }
         const detail = body.error || `HTTP ${response.status}`;
         setLastError(`Saving subscription failed: ${detail}`);
-        setDiag((p) =>
-          p ? { ...p, subscribeError: `HTTP ${response.status} — ${detail}` } : p
-        );
         try {
           await subscription.unsubscribe();
         } catch {
@@ -461,16 +337,14 @@ export default function NotificationSettingsPage() {
         return false;
       }
 
-      setDiag((p) =>
-        p ? { ...p, lastEndpoint: subscription.endpoint, subscribeError: null } : p
-      );
       setPushState("subscribed");
+      setPushConfigured(true);
+      setPushBlock(null);
       return true;
     } catch (err) {
       const msg = describeError(err);
       console.error("[push] subscribe failed:", err);
       setLastError(`Subscription failed: ${msg}`);
-      setDiag((p) => (p ? { ...p, subscribeError: msg } : p));
       setPushState("error");
       return false;
     }
@@ -489,7 +363,6 @@ export default function NotificationSettingsPage() {
     } catch {
       // ignore
     }
-    setDiag((p) => (p ? { ...p, lastEndpoint: null } : p));
     setPushState("no-subscription");
   }, []);
 
@@ -510,7 +383,7 @@ export default function NotificationSettingsPage() {
       const permission = await Promise.race([permissionPromise, timeoutPromise]);
       setPermission(permission as PermissionStatus);
       if (permission === "granted") {
-        if (diag?.pushSupport === "available") {
+        if (pushConfigured) {
           await subscribeToPush();
         }
       } else if (permission === "denied") {
@@ -523,7 +396,7 @@ export default function NotificationSettingsPage() {
       console.error("[notifications] requestPermission failed:", err);
       setLastError(`Permission request failed: ${msg}`);
     }
-  }, [diag, subscribeToPush]);
+  }, [pushConfigured, subscribeToPush]);
 
   const handleTurnOff = useCallback(async () => {
     await unsubscribeFromPush();
@@ -531,17 +404,15 @@ export default function NotificationSettingsPage() {
 
   // ─── Derived UI flags ─────────────────────────────────────────────────────
 
-  const notificationsReady =
-    diag?.notificationSupport === "available" && permission === "granted";
-  const pushReady =
-    notificationsReady && diag?.pushSupport === "available" && pushState === "subscribed";
+  const notificationsReady = notificationBlock === null && permission === "granted";
+  const pushReady = notificationsReady && pushConfigured && pushState === "subscribed";
 
   const isLoading = swState === "registering" || pushState === "subscribing";
 
-  const showIOSInstallPrompt = diag?.notificationSupport === "ios-needs-pwa";
-  const showFullyUnsupported = diag?.notificationSupport === "no-api";
-  const showInsecureHint = diag?.notificationSupport === "insecure";
-  const showIframeHint = diag?.notificationSupport === "iframe";
+  const showIOSInstallPrompt = notificationBlock === "ios-needs-pwa";
+  const showFullyUnsupported = notificationBlock === "no-api";
+  const showInsecureHint = notificationBlock === "insecure";
+  const showIframeHint = notificationBlock === "iframe";
 
   // ─── Status copy (one line, plain language) ──────────────────────────────
 
@@ -553,10 +424,9 @@ export default function NotificationSettingsPage() {
       return "Install Ralts to your Home Screen to turn on notifications.";
     if (showInsecureHint) return "Notifications need a secure connection.";
     if (showIframeHint) return "Open this page in its own tab to enable notifications.";
-    if (!diag) return "Checking…";
-    if (!notificationsReady) return "Notifications are off.";
+    if (permission === "default") return "Notifications are off.";
     if (pushReady) return "Background push is on.";
-    if (diag.pushSupport === "available")
+    if (pushConfigured)
       return "Notifications are on. Tap below to also enable background push.";
     return "Notifications are on.";
   })();
@@ -567,12 +437,25 @@ export default function NotificationSettingsPage() {
       : pushReady
         ? "ok"
         : notificationsReady
-          ? diag?.pushSupport === "available"
+          ? pushConfigured
             ? "pending"
             : "info"
           : showIOSInstallPrompt || showInsecureHint || showIframeHint
             ? "info"
             : "pending";
+
+  // User-facing explanation when push is configured but the VAPID key was
+  // missing — phrased in plain language, not technical.
+  const pushBlockReason =
+    pushBlock === "no-vapid"
+      ? "Background push is disabled by the server configuration, but local notifications still work."
+      : pushBlock === "insecure"
+        ? "Background push needs a secure connection."
+        : pushBlock === "no-sw"
+          ? "Background push needs a service worker, which this browser doesn't support."
+          : pushBlock === "no-push-manager"
+            ? "This browser doesn't support background push."
+            : null;
 
   // ─── Render ──────────────────────────────────────────────────────────────
 
@@ -601,9 +484,7 @@ export default function NotificationSettingsPage() {
                     : "bg-surface-elevated text-text-tertiary"
             }`}
           >
-            {summaryState === "ok" ? (
-              <Bell className="h-4 w-4" strokeWidth={1.75} />
-            ) : summaryState === "error" ? (
+            {summaryState === "error" ? (
               <BellOff className="h-4 w-4" strokeWidth={1.75} />
             ) : (
               <Bell className="h-4 w-4" strokeWidth={1.75} />
@@ -626,7 +507,7 @@ export default function NotificationSettingsPage() {
           <div className="bg-surface rounded-xl p-5 text-center space-y-2">
             <p className="text-sm font-medium text-text-primary">Notifications Not Supported</p>
             <p className="text-xs text-text-secondary">
-              {diag?.notificationSupportReason ?? "This browser doesn't expose the Notification API."}
+              This browser doesn&apos;t expose the Notification API.
             </p>
           </div>
         )}
@@ -654,8 +535,7 @@ export default function NotificationSettingsPage() {
             </div>
             <p className="text-sm font-medium text-text-primary">A secure connection is required</p>
             <p className="text-xs text-text-secondary break-words">
-              {diag?.notificationSupportReason ??
-                "Notifications need HTTPS or http://localhost to work."}
+              Notifications need HTTPS or http://localhost to work.
             </p>
           </div>
         )}
@@ -664,8 +544,7 @@ export default function NotificationSettingsPage() {
           <div className="bg-surface rounded-xl p-5 text-center space-y-2">
             <p className="text-sm font-medium text-text-primary">Open this page in its own tab</p>
             <p className="text-xs text-text-secondary">
-              {diag?.notificationSupportReason ??
-                "Notifications can't be requested from inside an iframe."}
+              Notifications can&apos;t be requested from inside an iframe.
             </p>
           </div>
         )}
@@ -683,7 +562,7 @@ export default function NotificationSettingsPage() {
           )}
 
         {/* ─── ONE primary action ─────────────────────────────────────── */}
-        {permission === "default" && diag?.notificationSupport === "available" && (
+        {permission === "default" && notificationBlock === null && (
           <Button
             onClick={handleEnable}
             disabled={isLoading}
@@ -693,17 +572,15 @@ export default function NotificationSettingsPage() {
           </Button>
         )}
 
-        {permission === "granted" &&
-          diag?.pushSupport === "available" &&
-          pushState !== "subscribed" && (
-            <Button
-              onClick={handleEnable}
-              disabled={isLoading}
-              className="w-full h-11 bg-accent text-white hover:bg-accent/90"
-            >
-              {pushState === "subscribing" ? "Activating…" : "Enable background push"}
-            </Button>
-          )}
+        {permission === "granted" && pushConfigured && pushState !== "subscribed" && (
+          <Button
+            onClick={handleEnable}
+            disabled={isLoading}
+            className="w-full h-11 bg-accent text-white hover:bg-accent/90"
+          >
+            {pushState === "subscribing" ? "Activating…" : "Enable background push"}
+          </Button>
+        )}
 
         {/* ─── Subtle Turn off link (only when something is on) ───────── */}
         {notificationsReady && (
@@ -728,85 +605,19 @@ export default function NotificationSettingsPage() {
           </div>
         )}
 
+        {/* ─── Plain-language note when push can't work ───────────────── */}
+        {notificationsReady && pushBlockReason && pushBlock !== null && (
+          <p className="text-[11px] text-text-tertiary text-center px-2">
+            {pushBlockReason}
+          </p>
+        )}
+
         {/* ─── Subtle success indicator when push is on ───────────────── */}
         {pushReady && (
           <div className="flex items-center gap-1.5 text-xs text-success px-1">
             <CheckCircle2 className="h-3 w-3" strokeWidth={1.5} />
             Background push is active on this device.
           </div>
-        )}
-
-        {/* ─── Advanced · diagnostics (collapsed, no buttons) ──────────── */}
-        {diag && (
-          <details className="bg-surface rounded-xl px-4 py-3 mt-6">
-            <summary className="text-xs font-medium text-text-tertiary uppercase tracking-wider cursor-pointer select-none">
-              Advanced · diagnostics
-            </summary>
-            <div className="pt-3 text-[11px] text-text-tertiary space-y-1 break-words font-mono border-t border-border mt-3">
-              <div>
-                <b>Origin:</b> {diag.origin} ({diag.protocol}
-                {"//"}
-                {diag.hostname})
-              </div>
-              <div>
-                <b>Secure context:</b> {String(diag.isSecureContext)} · Top-level:{" "}
-                {String(diag.isTopLevel)} · Iframe: {String(diag.isInIframe)}
-              </div>
-              <div>
-                <b>typeof window.Notification:</b> {diag.typeofNotification}
-              </div>
-              <div>
-                <b>typeof navigator.serviceWorker:</b> {diag.typeofServiceWorker}
-              </div>
-              <div>
-                <b>Notification support:</b> {diag.notificationSupport}
-                {diag.notificationSupportReason ? ` — ${diag.notificationSupportReason}` : ""}
-              </div>
-              <div>
-                <b>Push support:</b> {diag.pushSupport}
-                {diag.pushSupportReason ? ` — ${diag.pushSupportReason}` : ""}
-              </div>
-              <div>
-                <b>SW controller active:</b> {String(diag.swControllerActive)}
-              </div>
-              <div>
-                <b>SW registration:</b> {String(diag.swRegistrationExists)} · pushManager:{" "}
-                {String(diag.swRegistrationPushManager)} · active:{" "}
-                {String(diag.swRegistrationActive)}
-              </div>
-              <div>
-                <b>Notification.permission:</b> {diag.notificationPermissionValue}
-              </div>
-              <div>
-                <b>VAPID key:</b>{" "}
-                {diag.vapidKeyPresent
-                  ? `present (${diag.vapidKeyLength} chars)`
-                  : "MISSING — push is disabled"}
-              </div>
-              <div>
-                <b>Standalone:</b> {String(diag.isStandalone)} · iOS: {String(diag.isIOS)}
-              </div>
-              {diag.lastEndpoint && (
-                <div>
-                  <b>Endpoint:</b> {diag.lastEndpoint.slice(0, 80)}
-                  {diag.lastEndpoint.length > 80 ? "…" : ""}
-                </div>
-              )}
-              {diag.subscribeError && (
-                <div>
-                  <b>Subscribe error:</b> {diag.subscribeError}
-                </div>
-              )}
-              {diag.sendError && (
-                <div>
-                  <b>Send error:</b> {diag.sendError}
-                </div>
-              )}
-              <div>
-                <b>Captured:</b> {diag.capturedAt}
-              </div>
-            </div>
-          </details>
         )}
       </div>
     </div>
